@@ -120,9 +120,9 @@ class NetworkController extends EventEmitter {
       }
       const entry = this.getTraffic({ url: query })[0];
       if (entry) return entry.id;
-    } else if (query && query.requestId) {
+    } else if (query?.requestId) {
       return query.requestId;
-    } else if (query && query.url) {
+    } else if (query?.url) {
       const entry = this.getTraffic({ url: query.url })[0];
       if (entry) return entry.id;
     }
@@ -139,8 +139,10 @@ class NetworkController extends EventEmitter {
     const entry = this._entries.get(requestId);
 
     try {
-      const res = await this._cdp.send('Network.getRequestPostData', { requestId });
-      if (res && res.postData) {
+      const res = await this._cdp.send('Network.getRequestPostData', {
+        requestId: entry?.cdpRequestId || requestId,
+      });
+      if (res?.postData) {
         if (entry) entry.postData = res.postData;
         return res.postData;
       }
@@ -162,9 +164,17 @@ class NetworkController extends EventEmitter {
     const requestId = this._resolveRequestId(query);
     const entry = this._entries.get(requestId);
 
+    if (entry && entry.id !== entry.cdpRequestId) {
+      throw new Error(
+        `No response body for redirect hop ${entry.id} (${entry.status} to ${entry.redirectedTo}). ` +
+          `Chrome keeps no body for a redirect; asking for one would return the body of the final ` +
+          `hop, request id ${entry.cdpRequestId}, which is a different response.`
+      );
+    }
+
     try {
       const result = await this._cdp.send('Network.getResponseBody', {
-        requestId,
+        requestId: entry?.cdpRequestId || requestId,
       });
 
       let parsedJson = null;
@@ -222,8 +232,7 @@ class NetworkController extends EventEmitter {
 
     const postData = await this.getRequestPostData(requestId);
     if (postData) {
-      lines.push('');
-      lines.push(postData);
+      lines.push('', postData);
     }
 
     return lines.join('\r\n');
@@ -254,8 +263,7 @@ class NetworkController extends EventEmitter {
 
     try {
       const { body, base64Encoded } = await this.getResponseBody(requestId);
-      lines.push('');
-      lines.push(base64Encoded ? `[Base64 Encoded Binary: ${body.slice(0, 80)}...]` : body);
+      lines.push('', base64Encoded ? `[Base64 Encoded Binary: ${body.slice(0, 80)}...]` : body);
     } catch {}
 
     return lines.join('\r\n');
@@ -268,13 +276,7 @@ class NetworkController extends EventEmitter {
    * @returns {Array<object>}
    */
   searchTraffic(query) {
-    const isRegex = query instanceof RegExp;
-    const test = (str) => {
-      if (typeof str !== 'string') return false;
-      if (!isRegex) return str.includes(query);
-      query.lastIndex = 0;
-      return query.test(str);
-    };
+    const test = (str) => matchesQuery(str, query);
 
     const matches = [];
     for (const entry of this._entries.values()) {
@@ -335,13 +337,19 @@ class NetworkController extends EventEmitter {
     if (!this._entries.has(id)) {
       this._entries.set(id, {
         id,
+        cdpRequestId: id,
+        redirectIndex: 0,
+        redirectedFrom: null,
+        redirectedTo: null,
         url: '',
         method: 'GET',
         resourceType: 'Other',
         headers: {},
         rawHeaders: null,
         postData: null,
-        startTime: Date.now(),
+        // CDP monotonic seconds*1000, set by the first event that carries a timestamp.
+        // Never seed with Date.now(): mixing epoch ms into this field yields bogus durationMs.
+        startTime: null,
         status: null,
         statusText: null,
         responseHeaders: null,
@@ -363,8 +371,44 @@ class NetworkController extends EventEmitter {
   /**
    * @private
    */
+  /**
+   * Chrome reuses one requestId across a redirect chain, so an in-place update would
+   * overwrite the hop being audited with its own destination. Re-keys the finished hop
+   * so every hop stays addressable, and returns the index the next hop should carry.
+   * @returns {number}
+   * @private
+   */
+  _preserveRedirectedHop(event) {
+    const finishedHop = event.redirectResponse && this._entries.get(event.requestId);
+    if (!finishedHop) return 0;
+
+    const cause = event.redirectResponse;
+    finishedHop.status = cause.status;
+    finishedHop.statusText = cause.statusText;
+    finishedHop.responseHeaders = cause.headers;
+    finishedHop.mimeType = cause.mimeType || null;
+    finishedHop.protocol = cause.protocol || null;
+    finishedHop.remoteIPAddress = cause.remoteIPAddress || null;
+    finishedHop.remotePort = cause.remotePort || null;
+    finishedHop.redirectedTo = event.request.url;
+    if (finishedHop.startTime) {
+      finishedHop.durationMs = Math.round(event.timestamp * 1000 - finishedHop.startTime);
+    }
+
+    finishedHop.id = `${event.requestId}:redirect:${finishedHop.redirectIndex}`;
+    this._entries.delete(event.requestId);
+    this._entries.set(finishedHop.id, finishedHop);
+    this.emit('response', finishedHop);
+
+    return finishedHop.redirectIndex + 1;
+  }
+
   _onRequestWillBeSent(event) {
+    const redirectIndex = this._preserveRedirectedHop(event);
+
     const entry = this._getOrCreateEntry(event.requestId);
+    entry.redirectIndex = redirectIndex;
+    entry.redirectedFrom = event.redirectResponse?.url || null;
     entry.url = event.request.url;
     entry.method = event.request.method;
     entry.headers = event.request.headers;

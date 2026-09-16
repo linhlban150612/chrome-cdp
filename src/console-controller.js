@@ -127,7 +127,7 @@ class ConsoleController extends EventEmitter {
    * @param {{ ownProperties?: boolean }} [options]
    * @returns {Promise<Array<{ name: string, value: any, type: string, isGetter: boolean, isSetter: boolean }>>}
    */
-  async inspectObject(objectIdOrExpression, options = { ownProperties: true }) {
+  async inspectObject(objectIdOrExpression, { ownProperties = true } = {}) {
     let targetObjectId = objectIdOrExpression;
     let releaseTarget = false;
 
@@ -162,7 +162,7 @@ class ConsoleController extends EventEmitter {
 
     const res = await this._cdp.send('Runtime.getProperties', {
       objectId: targetObjectId,
-      ownProperties: Boolean(options.ownProperties),
+      ownProperties: Boolean(ownProperties),
       generatePreview: true,
     });
 

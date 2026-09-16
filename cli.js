@@ -35,21 +35,52 @@ Options:
   --help                        Display this help message
 `;
 
-async function main() {
-  const args = process.argv.slice(2);
-  const command = args[0];
+/**
+ * Splits global options out of argv so they never land in a positional slot --
+ * `eval <expr> --port 9333` used to evaluate the flags as part of the expression.
+ * @param {string[]} argv
+ * @returns {{ positional: string[], port: number, isJson: boolean }}
+ */
+function parseGlobalOptions(argv) {
+  const positional = [];
+  let port = 9222;
+  let isJson = false;
 
-  if (!command || args.includes('--help') || args.includes('-h')) {
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--port') {
+      port = Number(argv[++i]);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new Error('Port must be an integer between 1 and 65535');
+      }
+    } else if (argv[i] === '--json') {
+      isJson = true;
+    } else {
+      positional.push(argv[i]);
+    }
+  }
+
+  return { positional, port, isJson };
+}
+
+/** Releases a client exactly once; the outer `finally` must not repeat the teardown. */
+async function release(client, { closePage = true } = {}) {
+  if (activeClient === client) activeClient = null;
+  if (closePage) await client.closePage().catch(() => {});
+  try {
+    client.disconnect();
+  } catch {}
+}
+
+async function main() {
+  const argv = process.argv.slice(2);
+
+  if (!argv[0] || argv.includes('--help') || argv.includes('-h')) {
     console.log(HELP_TEXT);
     process.exit(0);
   }
 
-  const portFlagIdx = args.indexOf('--port');
-  const port = portFlagIdx !== -1 ? Number(args[portFlagIdx + 1]) : 9222;
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error('Port must be an integer between 1 and 65535');
-  }
-  const isJson = args.includes('--json');
+  const { positional: args, port, isJson } = parseGlobalOptions(argv);
+  const command = args[0];
 
   switch (command) {
     case 'start': {
@@ -77,8 +108,7 @@ async function main() {
         console.log(article.markdown);
       }
 
-      await client.closePage();
-      client.disconnect();
+      await release(client);
       break;
     }
 
@@ -95,8 +125,7 @@ async function main() {
       const result = { url, forms, hiddenInputs: hidden };
       console.log(JSON.stringify(result, null, 2));
 
-      await client.closePage();
-      client.disconnect();
+      await release(client);
       break;
     }
 
@@ -113,8 +142,7 @@ async function main() {
       const result = { url, ...storage, cookies };
       console.log(JSON.stringify(result, null, 2));
 
-      await client.closePage();
-      client.disconnect();
+      await release(client);
       break;
     }
 
@@ -129,8 +157,7 @@ async function main() {
       const listeners = await client.dom.getEventListeners(selector);
       console.log(JSON.stringify({ target: selector, listeners }, null, 2));
 
-      await client.closePage();
-      client.disconnect();
+      await release(client);
       break;
     }
 
@@ -147,8 +174,7 @@ async function main() {
       const results = await client.sources.searchInSources(query);
       console.log(JSON.stringify({ query, count: results.length, matches: results }, null, 2));
 
-      await client.closePage();
-      client.disconnect();
+      await release(client);
       break;
     }
 
@@ -166,8 +192,7 @@ async function main() {
       const downloadRes = await client.sources.downloadBundle(queryOrId, destFile);
       console.log(`Successfully downloaded bundle: ${downloadRes.filePath} (${downloadRes.bytesWritten} bytes)`);
 
-      await client.closePage();
-      client.disconnect();
+      await release(client);
       break;
     }
 
@@ -190,8 +215,7 @@ async function main() {
         console.log(deobf.code);
       }
 
-      await client.closePage();
-      client.disconnect();
+      await release(client);
       break;
     }
 
@@ -209,8 +233,7 @@ async function main() {
       const unpackRes = await client.sources.unpackBundle(queryOrId, destDir);
       console.log(`Successfully unpacked ${unpackRes.moduleCount} modules to: ${unpackRes.outputDirectory}`);
 
-      await client.closePage();
-      client.disconnect();
+      await release(client);
       break;
     }
 
@@ -228,8 +251,7 @@ async function main() {
       const astMatches = await client.sources.searchAst(queryOrId, pattern);
       console.log(JSON.stringify({ pattern, count: astMatches.length, matches: astMatches }, null, 2));
 
-      await client.closePage();
-      client.disconnect();
+      await release(client);
       break;
     }
 
@@ -241,12 +263,12 @@ async function main() {
       const vpIdx = args.indexOf('--viewport');
       let width = 1280;
       let height = 800;
-      if (vpIdx !== -1 && args[vpIdx + 1]) {
-        const parts = args[vpIdx + 1].split('x').map(Number);
-        if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
-          width = parts[0];
-          height = parts[1];
+      if (vpIdx !== -1) {
+        const parts = (args[vpIdx + 1] || '').split('x').map(Number);
+        if (parts.length !== 2 || !parts.every((n) => Number.isInteger(n) && n > 0)) {
+          throw new Error(`Invalid --viewport value: ${args[vpIdx + 1] || '(missing)'}. Expected WxH, e.g. 1920x1080`);
         }
+        [width, height] = parts;
       }
 
       const client = (activeClient = await connect({ port }));
@@ -258,8 +280,7 @@ async function main() {
       await client.screenshot({ path: path.resolve(destFile), fullPage });
       console.log(`Screenshot saved to: ${path.resolve(destFile)} (${width}x${height})`);
 
-      await client.closePage();
-      client.disconnect();
+      await release(client);
       break;
     }
 
@@ -290,8 +311,7 @@ async function main() {
         });
       }
 
-      await client.closePage();
-      client.disconnect();
+      await release(client);
       break;
     }
 
@@ -303,7 +323,7 @@ async function main() {
       const result = await client.evaluate(expression);
       console.log(result);
 
-      client.disconnect();
+      await release(client, { closePage: false });
       break;
     }
 
@@ -320,9 +340,5 @@ main()
     process.exitCode = 1;
   })
   .finally(async () => {
-    if (activeClient) {
-      await activeClient.closePage().catch(() => {});
-      activeClient.disconnect();
-      activeClient = null;
-    }
+    if (activeClient) await release(activeClient);
   });

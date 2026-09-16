@@ -133,7 +133,7 @@ class ChromeClient {
     try {
       return await this.page.goto(url, opts);
     } catch (err) {
-      if (err.message && err.message.includes('timeout')) {
+      if (err.message?.includes('timeout')) {
         const readyState = await this.page
           .evaluate(() => document.readyState)
           .catch(() => null);

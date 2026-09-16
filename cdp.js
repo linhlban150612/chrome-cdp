@@ -6,9 +6,9 @@ const os = require('node:os');
 
 const DEFAULT_PORT = 9222;
 const DEFAULT_PATHS = [
-  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-  path.join(process.env.LOCALAPPDATA || '', 'Google\\Chrome\\Application\\chrome.exe'),
+  String.raw`C:\Program Files\Google\Chrome\Application\chrome.exe`,
+  String.raw`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+  path.join(process.env.LOCALAPPDATA || '', String.raw`Google\Chrome\Application\chrome.exe`),
 ];
 
 function findChromePath() {

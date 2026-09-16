@@ -38,6 +38,12 @@ class DebugController extends EventEmitter {
   }
   async setBreakpoint(url, lineNumber, columnNumber = 0, condition) {
     if (!url || !Number.isInteger(lineNumber) || lineNumber < 0) throw new TypeError('url and non-negative lineNumber are required');
+    if (!Number.isFinite(columnNumber)) {
+      throw new TypeError(
+        `columnNumber must be a number, got ${typeof columnNumber} (${JSON.stringify(columnNumber)}). ` +
+          'To pass a condition without a column, call setBreakpoint(url, line, 0, condition).'
+      );
+    }
     const params = { url, lineNumber, columnNumber };
     if (condition) params.condition = condition;
     const result = await this._cdp.send('Debugger.setBreakpointByUrl', params);
