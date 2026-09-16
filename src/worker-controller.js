@@ -55,7 +55,12 @@ class WorkerController extends EventEmitter {
       await session.detach();
       return;
     }
-    await session.send('Runtime.enable');
+    try {
+      await session.send('Runtime.enable');
+    } catch (error) {
+      await session.detach().catch(() => {});
+      throw error;
+    }
     const item = { id, type: type || this._getWorkerType(target), url: target.url(), target, session };
     this._workers.set(item.id, item);
     this.emit('created', this.info(item));
@@ -72,7 +77,7 @@ class WorkerController extends EventEmitter {
   }
   info(item) { return { id: item.id, type: item.type, url: item.url }; }
   list() { return [...this._workers.values()].map((item) => this.info(item)); }
-  _get(id) { const item = this._workers.get(id); if (!item) throw new Error(`Worker target not found: ${id}`); return item; }
+  _get(id) { const item = this._workers.get(id); if (!item) { throw new Error(`Worker target not found: ${id}`); } return item; }
 
   async evaluate(id, expression, options = {}) {
     if (typeof expression !== 'string') throw new TypeError('Worker expression must be a string');

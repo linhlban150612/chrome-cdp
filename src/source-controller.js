@@ -2,9 +2,10 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const EventEmitter = require('events');
+const EventEmitter = require('node:events');
 const { webcrack } = require('webcrack');
 const { js } = require('@ast-grep/napi');
+const matchesQuery = require('./match-query');
 
 /**
  * Controller for inspecting JavaScript sources, searching within bundles,
@@ -84,8 +85,7 @@ class SourceController extends EventEmitter {
         return false;
       }
       if (filter.url) {
-        const matches =
-          filter.url instanceof RegExp ? filter.url.test(s.url) : s.url.includes(filter.url);
+        const matches = matchesQuery(s.url, filter.url);
         if (!matches) return false;
       }
       return true;
@@ -164,7 +164,7 @@ class SourceController extends EventEmitter {
   /**
    * Searches for a string or regular expression inside loaded scripts/bundles.
    * Equivalent to Chrome DevTools Source panel search (Ctrl+Shift+F).
-   * @param {string} query
+   * @param {string | RegExp} query
    * @param {{
    *   scriptId?: string,
    *   caseSensitive?: boolean,
@@ -292,7 +292,7 @@ class SourceController extends EventEmitter {
    * @param {string} scriptIdOrUrl
    * @param {string} pattern - AST pattern (e.g. "console.log($ARG)" or "fetch($URL, $$$)")
    * @param {{ deobfuscateFirst?: boolean }} [options]
-   * @returns {Promise<Array<{ text: string, range: object, matches: Record<string, string> }>>}
+   * @returns {Promise<Array<{ text: string, range: object, metaMatches: Record<string, string> }>>}
    */
   async searchAst(scriptIdOrUrl, pattern, options = {}) {
     if (!pattern) throw new TypeError('AST pattern is required');

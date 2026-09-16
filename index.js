@@ -10,6 +10,7 @@ const WorkerController = require('./src/worker-controller');
 const DebugController = require('./src/debug-controller');
 const PerformanceController = require('./src/performance-controller');
 const { startChrome, findChromePath, checkCdpReady } = require('./cdp');
+const { waitUntil, assertEventually, waitForEvent } = require('./src/waiting');
 
 const { webcrack } = require('webcrack');
 const astGrep = require('@ast-grep/napi');
@@ -48,6 +49,9 @@ module.exports = {
   DebugController,
   PerformanceController,
   connect,
+  waitUntil,
+  assertEventually,
+  waitForEvent,
   startChrome,
   findChromePath,
   checkCdpReady,

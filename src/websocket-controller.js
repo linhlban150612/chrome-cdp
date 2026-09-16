@@ -85,8 +85,7 @@ class WebSocketController extends EventEmitter {
     const list = Array.from(this._sockets.values());
     return list.filter((sock) => {
       if (filter.url) {
-        const matches =
-          filter.url instanceof RegExp ? filter.url.test(sock.url) : sock.url.includes(filter.url);
+        const matches = matchesQuery(sock.url, filter.url);
         if (!matches) return false;
       }
       if (filter.state && sock.state !== filter.state) {
@@ -187,7 +186,7 @@ class WebSocketController extends EventEmitter {
    * @private
    */
   _tryParseJson(str) {
-    if (typeof str !== 'string' || !str.startsWith('{') && !str.startsWith('[')) {
+    if (typeof str !== 'string' || (!str.startsWith('{') && !str.startsWith('['))) {
       return null;
     }
     try {

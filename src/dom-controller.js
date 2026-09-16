@@ -169,7 +169,7 @@ class DOMController {
       const isVisible = !(
         style.display === 'none' ||
         style.visibility === 'hidden' ||
-        parseFloat(style.opacity) === 0 ||
+        Number.parseFloat(style.opacity) === 0 ||
         rect.width === 0 ||
         rect.height === 0
       );
@@ -364,22 +364,39 @@ class DOMController {
       window.__postMessageLogs = [];
 
       const originalAddEventListener = window.addEventListener;
+      const originalRemoveEventListener = window.removeEventListener;
+      // Keep the wrapper addressable, otherwise the page's own removeEventListener('message', fn)
+      // silently does nothing and the handler stays attached for the rest of the session.
+      const wrappers = new WeakMap();
+
       window.addEventListener = function (type, listener, options) {
-        if (type === 'message') {
-          const wrappedListener = function (event) {
-            window.__postMessageLogs.push({
-              direction: 'received',
-              origin: event.origin,
-              data: event.data,
-              timestamp: Date.now(),
-            });
-            return typeof listener === 'function'
-              ? listener.apply(this, arguments)
-              : listener.handleEvent(event);
-          };
+        if (type === 'message' && listener) {
+          let wrappedListener = wrappers.get(listener);
+          if (!wrappedListener) {
+            wrappedListener = function (event) {
+              window.__postMessageLogs.push({
+                direction: 'received',
+                origin: event.origin,
+                data: event.data,
+                timestamp: Date.now(),
+              });
+              return typeof listener === 'function'
+                ? listener.apply(this, arguments)
+                : listener.handleEvent(event);
+            };
+            wrappers.set(listener, wrappedListener);
+          }
           return originalAddEventListener.call(this, type, wrappedListener, options);
         }
         return originalAddEventListener.apply(this, arguments);
+      };
+
+      window.removeEventListener = function (type, listener, options) {
+        const wrappedListener = type === 'message' && listener ? wrappers.get(listener) : null;
+        if (wrappedListener) {
+          return originalRemoveEventListener.call(this, type, wrappedListener, options);
+        }
+        return originalRemoveEventListener.apply(this, arguments);
       };
 
       const originalPostMessage = window.postMessage;
@@ -422,12 +439,14 @@ class DOMController {
     const url = this._page.url();
 
     const dom = new JSDOM(html, { url });
-    const reader = new Readability(dom.window.document, {
-      keepClasses: false,
-    });
-    const article = reader.parse();
+    let article;
+    try {
+      article = new Readability(dom.window.document, { keepClasses: false }).parse();
+    } finally {
+      dom.window.close();
+    }
 
-    if (!article || !article.content) {
+    if (!article?.content) {
       return null;
     }
 

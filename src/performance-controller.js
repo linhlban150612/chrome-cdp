@@ -5,6 +5,8 @@ const { performance } = require('node:perf_hooks');
 /** Lightweight timing, metrics and trace capture for bottleneck analysis. */
 class PerformanceController {
   constructor(page, cdp) {
+    if (!page) throw new TypeError('Page instance is required for PerformanceController');
+    if (!cdp) throw new TypeError('CDPSession is required for PerformanceController');
     this._page = page;
     this._cdp = cdp;
     this._tracing = false;
@@ -20,6 +22,8 @@ class PerformanceController {
   }
   async startTrace(options = {}) {
     if (this._tracing) throw new Error('A performance trace is already running');
+    // Enables the Performance domain up front so counters are already ticking when the
+    // trace starts; a first read taken after Tracing.start would miss the early samples.
     await this.metrics();
     await this._cdp.send('Tracing.start', {
       categories: options.categories || 'devtools.timeline,v8.execute,disabled-by-default-v8.cpu_profiler',
@@ -27,20 +31,26 @@ class PerformanceController {
     });
     this._tracing = true;
   }
-  async stopTrace() {
+  async stopTrace(options = {}) {
     if (!this._tracing) throw new Error('No performance trace is running');
+    const timeout = options.timeout ?? 30000;
     let stream;
     try {
       stream = await new Promise((resolve, reject) => {
-        const onComplete = (event) => {
+        let timer;
+        const settle = (finish) => (value) => {
+          clearTimeout(timer);
           this._cdp.off('Tracing.tracingComplete', onComplete);
-          resolve(event.stream);
+          finish(value);
         };
+        const onComplete = (event) => settle(resolve)(event.stream);
+        const fail = settle(reject);
         this._cdp.on('Tracing.tracingComplete', onComplete);
-        this._cdp.send('Tracing.end').catch((error) => {
-          this._cdp.off('Tracing.tracingComplete', onComplete);
-          reject(error);
-        });
+        timer = setTimeout(
+          () => fail(new Error(`Tracing.tracingComplete never arrived within ${timeout}ms`)),
+          timeout
+        );
+        this._cdp.send('Tracing.end').catch(fail);
       });
     } catch (error) {
       this._tracing = false;
