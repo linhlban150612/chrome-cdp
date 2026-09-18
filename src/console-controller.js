@@ -12,8 +12,9 @@ class ConsoleController extends EventEmitter {
   /**
    * @param {import('puppeteer').Page} page
    * @param {import('puppeteer').CDPSession} cdpSession
+   * @param {{ maxLogs?: number }} [options]
    */
-  constructor(page, cdpSession) {
+  constructor(page, cdpSession, options = {}) {
     super();
     if (!page) throw new TypeError('Page instance is required for ConsoleController');
     if (!cdpSession) throw new TypeError('CDPSession is required for ConsoleController');
@@ -23,6 +24,9 @@ class ConsoleController extends EventEmitter {
     /** @type {Array<object>} */
     this._logs = [];
     this._isRecording = false;
+    this.maxLogs = options.maxLogs ?? ConsoleController.DEFAULT_MAX_LOGS;
+    /** Log entries evicted to honor maxLogs. Non-zero means the capture was truncated. */
+    this.droppedCount = 0;
 
     this._onConsoleAPICalled = this._onConsoleAPICalled.bind(this);
     this._onExceptionThrown = this._onExceptionThrown.bind(this);
@@ -59,6 +63,7 @@ class ConsoleController extends EventEmitter {
    */
   clear() {
     this._logs = [];
+    this.droppedCount = 0;
   }
 
   /**
@@ -231,6 +236,18 @@ class ConsoleController extends EventEmitter {
   }
 
   /**
+   * Appends a log entry, evicting the oldest once maxLogs is reached.
+   * @private
+   */
+  _pushLog(entry) {
+    this._logs.push(entry);
+    while (this._logs.length > this.maxLogs) {
+      this._logs.shift();
+      this.droppedCount++;
+    }
+  }
+
+  /**
    * Internal handler for Runtime.consoleAPICalled.
    * @private
    */
@@ -257,7 +274,7 @@ class ConsoleController extends EventEmitter {
       timestamp: event.timestamp || Date.now(),
     };
 
-    this._logs.push(entry);
+    this._pushLog(entry);
     this.emit('message', entry);
   }
 
@@ -290,10 +307,12 @@ class ConsoleController extends EventEmitter {
       timestamp: event.timestamp || Date.now(),
     };
 
-    this._logs.push(entry);
+    this._pushLog(entry);
     this.emit('exception', entry);
     this.emit('message', entry);
   }
 }
+
+ConsoleController.DEFAULT_MAX_LOGS = 5000;
 
 module.exports = ConsoleController;

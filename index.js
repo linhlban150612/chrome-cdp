@@ -9,19 +9,21 @@ const SourceController = require('./src/source-controller');
 const WorkerController = require('./src/worker-controller');
 const DebugController = require('./src/debug-controller');
 const PerformanceController = require('./src/performance-controller');
-const { startChrome, findChromePath, checkCdpReady } = require('./cdp');
+const { startChrome, findChromePath, defaultUserDataDir, checkCdpReady } = require('./cdp');
 const { waitUntil, assertEventually, waitForEvent } = require('./src/waiting');
-
-const { webcrack } = require('webcrack');
-const astGrep = require('@ast-grep/napi');
 
 /**
  * Connects to an existing Chrome instance or launches one if not running.
  * @param {{
  *   port?: number,
  *   autoLaunch?: boolean,
+ *   log?: (message: string) => void,
  *   browserURL?: string,
- *   browserWSEndpoint?: string
+ *   browserWSEndpoint?: string,
+ *   maxEntries?: number,
+ *   maxFramesPerSocket?: number,
+ *   maxSockets?: number,
+ *   maxLogs?: number
  * }} [options]
  * @returns {Promise<ChromeClient>}
  */
@@ -31,7 +33,7 @@ async function connect(options = {}) {
   if (options.autoLaunch !== false) {
     const isReady = await checkCdpReady(port);
     if (!isReady) {
-      await startChrome({ port });
+      await startChrome({ port, log: options.log });
     }
   }
 
@@ -54,7 +56,16 @@ module.exports = {
   waitForEvent,
   startChrome,
   findChromePath,
+  defaultUserDataDir,
   checkCdpReady,
-  webcrack,
-  astGrep,
 };
+
+// Heavy (webcrack pulls in isolated-vm, ast-grep a native binary): load only on first use.
+Object.defineProperty(module.exports, 'webcrack', {
+  enumerable: true,
+  get: () => require('webcrack').webcrack,
+});
+Object.defineProperty(module.exports, 'astGrep', {
+  enumerable: true,
+  get: () => require('@ast-grep/napi'),
+});

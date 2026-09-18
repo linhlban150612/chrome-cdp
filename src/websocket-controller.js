@@ -10,8 +10,9 @@ const matchesQuery = require('./match-query');
 class WebSocketController extends EventEmitter {
   /**
    * @param {import('puppeteer').CDPSession} cdpSession
+   * @param {{ maxFramesPerSocket?: number, maxSockets?: number }} [options]
    */
-  constructor(cdpSession) {
+  constructor(cdpSession, options = {}) {
     super();
     if (!cdpSession) throw new TypeError('CDPSession is required for WebSocketController');
 
@@ -19,6 +20,11 @@ class WebSocketController extends EventEmitter {
     /** @type {Map<string, object>} */
     this._sockets = new Map();
     this._isRecording = false;
+    this.maxFramesPerSocket =
+      options.maxFramesPerSocket ?? WebSocketController.DEFAULT_MAX_FRAMES_PER_SOCKET;
+    this.maxSockets = options.maxSockets ?? WebSocketController.DEFAULT_MAX_SOCKETS;
+    /** Sockets evicted to honor maxSockets. Per-socket frame loss is in `socket.droppedFrames`. */
+    this.droppedSockets = 0;
 
     this._onSocketCreated = this._onSocketCreated.bind(this);
     this._onHandshakeReq = this._onHandshakeReq.bind(this);
@@ -71,6 +77,7 @@ class WebSocketController extends EventEmitter {
    */
   clear() {
     this._sockets.clear();
+    this.droppedSockets = 0;
   }
 
   /**
@@ -167,6 +174,10 @@ class WebSocketController extends EventEmitter {
    */
   _getOrCreateSocket(requestId, url = '') {
     if (!this._sockets.has(requestId)) {
+      while (this._sockets.size >= this.maxSockets && this._sockets.size > 0) {
+        this._sockets.delete(this._sockets.keys().next().value);
+        this.droppedSockets++;
+      }
       this._sockets.set(requestId, {
         requestId,
         url,
@@ -176,10 +187,23 @@ class WebSocketController extends EventEmitter {
         handshakeResponse: null,
         state: 'connecting',
         frames: [],
+        // Oldest frames evicted to honor maxFramesPerSocket. Non-zero means truncated.
+        droppedFrames: 0,
         errorMessage: null,
       });
     }
     return this._sockets.get(requestId);
+  }
+
+  /**
+   * @private
+   */
+  _pushFrame(sock, entry) {
+    sock.frames.push(entry);
+    while (sock.frames.length > this.maxFramesPerSocket) {
+      sock.frames.shift();
+      sock.droppedFrames++;
+    }
   }
 
   /**
@@ -251,7 +275,7 @@ class WebSocketController extends EventEmitter {
       isText: frameData.opcode === 1,
       parsedJson: this._tryParseJson(frameData.payloadData),
     };
-    sock.frames.push(entry);
+    this._pushFrame(sock, entry);
     this.emit('frameSent', entry);
     this.emit('frame', entry);
   }
@@ -274,7 +298,7 @@ class WebSocketController extends EventEmitter {
       isText: frameData.opcode === 1,
       parsedJson: this._tryParseJson(frameData.payloadData),
     };
-    sock.frames.push(entry);
+    this._pushFrame(sock, entry);
     this.emit('frameReceived', entry);
     this.emit('frame', entry);
   }
@@ -302,5 +326,8 @@ class WebSocketController extends EventEmitter {
     this.emit('socketClosed', { requestId: event.requestId, timestamp: event.timestamp });
   }
 }
+
+WebSocketController.DEFAULT_MAX_FRAMES_PER_SOCKET = 10000;
+WebSocketController.DEFAULT_MAX_SOCKETS = 500;
 
 module.exports = WebSocketController;

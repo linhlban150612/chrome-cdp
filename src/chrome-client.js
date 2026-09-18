@@ -11,9 +11,32 @@ const SourceController = require('./source-controller');
 const WorkerController = require('./worker-controller');
 const DebugController = require('./debug-controller');
 const PerformanceController = require('./performance-controller');
+const { buildHar } = require('./har');
 
 // Register stealth plugin once globally on puppeteer-extra
 puppeteer.use(StealthPlugin());
+
+/**
+ * Caps on in-memory capture. Oldest entries are evicted first and counted, so a
+ * truncated capture reports itself (droppedCount / droppedFrames) instead of reading as absence.
+ * @typedef {{ maxEntries?: number, maxFramesPerSocket?: number, maxSockets?: number, maxLogs?: number }} BufferLimits
+ */
+const LIMIT_KEYS = ['maxEntries', 'maxFramesPerSocket', 'maxSockets', 'maxLogs'];
+
+/** @returns {BufferLimits} */
+function pickLimits(options = {}) {
+  const limits = {};
+  for (const key of LIMIT_KEYS) {
+    if (options[key] === undefined) continue;
+    const value = options[key];
+    // NaN would silently disable the cap and 0 would still keep one item; fail loudly instead.
+    if (!(Number.isInteger(value) && value > 0) && value !== Infinity) {
+      throw new TypeError(`${key} must be a positive integer or Infinity, got ${JSON.stringify(value)}`);
+    }
+    limits[key] = value;
+  }
+  return limits;
+}
 
 /**
  * Unified high-level Chrome CDP Client.
@@ -24,16 +47,19 @@ class ChromeClient {
    * @param {import('puppeteer').Browser} browser
    * @param {import('puppeteer').Page} page
    * @param {import('puppeteer').CDPSession} cdpSession
+   * @param {WorkerController | null} [workerController]
+   * @param {BufferLimits} [limits]
    */
-  constructor(browser, page, cdpSession, workerController = null) {
+  constructor(browser, page, cdpSession, workerController = null, limits = {}) {
     this.browser = browser;
     this.page = page;
     this.cdp = cdpSession;
+    this._limits = pickLimits(limits);
 
     this.dom = new DOMController(page, cdpSession);
-    this.network = new NetworkController(page, cdpSession);
-    this.websocket = new WebSocketController(cdpSession);
-    this.console = new ConsoleController(page, cdpSession);
+    this.network = new NetworkController(page, cdpSession, this._limits);
+    this.websocket = new WebSocketController(cdpSession, this._limits);
+    this.console = new ConsoleController(page, cdpSession, this._limits);
     this.sources = new SourceController(cdpSession);
     this.debug = new DebugController(cdpSession);
     this.performance = new PerformanceController(page, cdpSession);
@@ -48,7 +74,7 @@ class ChromeClient {
    *   browserURL?: string,
    *   browserWSEndpoint?: string,
    *   autoEnableAll?: boolean
-   * }} [options]
+   * } & BufferLimits} [options]
    * @returns {Promise<ChromeClient>}
    */
   static async connect(options = {}) {
@@ -77,7 +103,7 @@ class ChromeClient {
     }
     const cdp = await page.createCDPSession();
 
-    const client = new ChromeClient(browser, page, cdp);
+    const client = new ChromeClient(browser, page, cdp, null, options);
     await client.workers.ready;
 
     // Auto-enable standard controllers if requested (default: true)
@@ -95,13 +121,15 @@ class ChromeClient {
 
   /**
    * Creates a new tab and attaches a new CDP session and controllers.
-   * @param {{ autoEnableAll?: boolean }} [options]
+   * Buffer limits default to this client's unless overridden.
+   * @param {{ autoEnableAll?: boolean } & BufferLimits} [options]
    * @returns {Promise<ChromeClient>}
    */
   async newPage(options = {}) {
     const page = await this.browser.newPage();
     const cdp = await page.createCDPSession();
-    const client = new ChromeClient(this.browser, page, cdp, this.workers);
+    const limits = { ...this._limits, ...pickLimits(options) };
+    const client = new ChromeClient(this.browser, page, cdp, this.workers, limits);
     await client.workers.ready;
 
     if (options.autoEnableAll !== false) {
@@ -211,6 +239,46 @@ class ChromeClient {
    */
   async toCheerio() {
     return this.dom.toCheerio();
+  }
+
+  /**
+   * Exports everything recorded so far as a HAR 1.2 log, WebSocket frames included as
+   * `_webSocketMessages`. Call it before closePage(): response bodies live in Chrome's
+   * buffer and are gone once the page navigates away.
+   * @param {{ includeBodies?: boolean }} [options]
+   * @returns {Promise<{ log: object }>}
+   */
+  async toHar(options = {}) {
+    const entries = this.network.getTraffic();
+    const sockets = this.websocket.getSockets();
+    const bodies = new Map();
+
+    if (options.includeBodies !== false) {
+      for (const entry of entries) {
+        if (entry.failed) continue;
+        if (entry.id !== entry.cdpRequestId) {
+          bodies.set(entry.id, { error: 'redirect hop, Chrome keeps no body' });
+          continue;
+        }
+        try {
+          bodies.set(entry.id, await this.network.getResponseBody(entry.id));
+        } catch (err) {
+          bodies.set(entry.id, { error: err.message });
+        }
+      }
+    }
+
+    return buildHar({
+      entries,
+      sockets,
+      bodies,
+      page: { title: await this.title().catch(() => ''), url: this.page.url() },
+      truncation: {
+        droppedRequests: this.network.droppedCount,
+        droppedSockets: this.websocket.droppedSockets,
+        droppedFrames: sockets.reduce((sum, s) => sum + (s.droppedFrames || 0), 0),
+      },
+    });
   }
 
   /**

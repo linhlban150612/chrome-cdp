@@ -12,8 +12,9 @@ class NetworkController extends EventEmitter {
   /**
    * @param {import('puppeteer').Page} page
    * @param {import('puppeteer').CDPSession} cdpSession
+   * @param {{ maxEntries?: number }} [options]
    */
-  constructor(page, cdpSession) {
+  constructor(page, cdpSession, options = {}) {
     super();
     if (!page) throw new TypeError('Page instance is required for NetworkController');
     if (!cdpSession) throw new TypeError('CDPSession is required for NetworkController');
@@ -23,6 +24,9 @@ class NetworkController extends EventEmitter {
     /** @type {Map<string, object>} */
     this._entries = new Map();
     this._isRecording = false;
+    this.maxEntries = options.maxEntries ?? NetworkController.DEFAULT_MAX_ENTRIES;
+    /** Entries evicted to honor maxEntries. Non-zero means the capture was truncated. */
+    this.droppedCount = 0;
 
     this._onRequestWillBeSent = this._onRequestWillBeSent.bind(this);
     this._onRequestExtraInfo = this._onRequestExtraInfo.bind(this);
@@ -71,6 +75,7 @@ class NetworkController extends EventEmitter {
    */
   clear() {
     this._entries.clear();
+    this.droppedCount = 0;
   }
 
   /**
@@ -335,6 +340,7 @@ class NetworkController extends EventEmitter {
    */
   _getOrCreateEntry(id) {
     if (!this._entries.has(id)) {
+      this._evictOldest();
       this._entries.set(id, {
         id,
         cdpRequestId: id,
@@ -363,14 +369,25 @@ class NetworkController extends EventEmitter {
         durationMs: null,
         failed: false,
         errorText: null,
+        // CDP ResourceTiming; the HAR export derives dns/connect/ssl/send/wait from it.
+        timing: null,
       });
     }
     return this._entries.get(id);
   }
 
   /**
+   * Makes room for one more entry. Map iteration is insertion order, so the first key
+   * is the oldest request.
    * @private
    */
+  _evictOldest() {
+    while (this._entries.size >= this.maxEntries && this._entries.size > 0) {
+      this._entries.delete(this._entries.keys().next().value);
+      this.droppedCount++;
+    }
+  }
+
   /**
    * Chrome reuses one requestId across a redirect chain, so an in-place update would
    * overwrite the hop being audited with its own destination. Re-keys the finished hop
@@ -390,6 +407,7 @@ class NetworkController extends EventEmitter {
     finishedHop.protocol = cause.protocol || null;
     finishedHop.remoteIPAddress = cause.remoteIPAddress || null;
     finishedHop.remotePort = cause.remotePort || null;
+    finishedHop.timing = cause.timing || null;
     finishedHop.redirectedTo = event.request.url;
     if (finishedHop.startTime) {
       finishedHop.durationMs = Math.round(event.timestamp * 1000 - finishedHop.startTime);
@@ -445,6 +463,7 @@ class NetworkController extends EventEmitter {
     entry.remotePort = resp.remotePort || null;
     entry.protocol = resp.protocol || null;
     entry.securityState = resp.securityState || null;
+    entry.timing = resp.timing || null;
 
     if (entry.startTime) {
       entry.durationMs = Math.round(event.timestamp * 1000 - entry.startTime);
@@ -486,5 +505,7 @@ class NetworkController extends EventEmitter {
     this.emit('failed', entry);
   }
 }
+
+NetworkController.DEFAULT_MAX_ENTRIES = 5000;
 
 module.exports = NetworkController;

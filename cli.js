@@ -27,6 +27,8 @@ Commands:
                                 Structural AST search using ast-grep (e.g. 'fetch($U, $$$)')
   screenshot <url> [destFile]   Take desktop screenshot (supports --viewport WxH, --fullPage)
   traffic <url> [--json]        Record network & WebSocket traffic during page load
+  har <url> [destFile] [--no-bodies]
+                                Export the page load as HAR 1.2 (default <host>.har, '-' = stdout)
   eval <expression>             Evaluate JavaScript expression on current page
 
 Options:
@@ -296,9 +298,15 @@ async function main() {
 
       const httpTraffic = client.network.getTraffic();
       const wsSockets = client.websocket.getSockets();
+      // Non-zero means the buffer overflowed and the oldest items are gone, not that none existed.
+      const truncation = {
+        droppedRequests: client.network.droppedCount,
+        droppedSockets: client.websocket.droppedSockets,
+        droppedFrames: wsSockets.reduce((sum, s) => sum + s.droppedFrames, 0),
+      };
 
       if (isJson) {
-        console.log(JSON.stringify({ httpTraffic, wsSockets }, null, 2));
+        console.log(JSON.stringify({ httpTraffic, wsSockets, truncation }, null, 2));
       } else {
         console.log(`\n=== HTTP Requests (${httpTraffic.length}) ===`);
         httpTraffic.forEach((t) => {
@@ -307,8 +315,45 @@ async function main() {
 
         console.log(`\n=== WebSocket Connections (${wsSockets.length}) ===`);
         wsSockets.forEach((s) => {
-          console.log(`[WS] ${s.url} - State: ${s.state}, Frames: ${s.frames.length}`);
+          const dropped = s.droppedFrames ? ` (+${s.droppedFrames} dropped)` : '';
+          console.log(`[WS] ${s.url} - State: ${s.state}, Frames: ${s.frames.length}${dropped}`);
         });
+
+        if (truncation.droppedRequests || truncation.droppedSockets || truncation.droppedFrames) {
+          console.log(`\n[!] Capture truncated: ${JSON.stringify(truncation)}`);
+        }
+      }
+
+      await release(client);
+      break;
+    }
+
+    case 'har': {
+      const includeBodies = !args.includes('--no-bodies');
+      const [, url, destArg] = args.filter((a) => a !== '--no-bodies');
+      if (!url) throw new Error('Target URL is required: node cli.js har <url> [destFile]');
+      const destFile = destArg || `${new URL(url).hostname || 'capture'}.har`;
+      const log = destFile === '-' ? console.error : console.log;
+
+      const client = (activeClient = await connect({ port, log }));
+      client.network.clear();
+      client.websocket.clear();
+
+      // A HAR is read as "the page load"; wait for the network to settle, not just the DOM.
+      await client.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+
+      // Bodies are drained here, before release() navigates the tab away and Chrome drops them.
+      const har = await client.toHar({ includeBodies });
+      const json = JSON.stringify(har, null, 2);
+
+      if (destFile === '-') {
+        process.stdout.write(`${json}\n`);
+      } else {
+        await fs.promises.writeFile(path.resolve(destFile), json, 'utf8');
+        const missing = har.log.entries.filter((e) => e.response.content.comment).length;
+        console.log(`Saved HAR (${har.log.entries.length} entries) to: ${path.resolve(destFile)}`);
+        if (includeBodies && missing) console.log(`[!] ${missing} entries have no body; see content.comment`);
+        if (har.log.comment) console.log(`[!] ${har.log.comment}`);
       }
 
       await release(client);

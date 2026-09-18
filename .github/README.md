@@ -11,6 +11,7 @@ npx skills add megait004/chrome-cdp --skill chrome-cdp
 - **Debug JavaScript** — pause, breakpoints, call frames, exceptions.
 - **Find root cause** — connect console → source → network → runtime.
 - **Read WebSockets** — connections, frames, payloads, timing.
+- **Export HAR** — the whole page load, bodies and WebSocket frames included, for DevTools, Burp, ZAP, or Charles.
 - **Reverse engineer** — inspect, search, extract, deobfuscate bundles.
 - **Debug workers** — dedicated, shared, and service workers.
 - **Find bottlenecks** — metrics and Chrome traces.

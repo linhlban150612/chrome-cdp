@@ -472,3 +472,429 @@ test('durationMs stays in the CDP timebase when a request is seen mid-flight', a
   assert.equal(entry.startTime, null, 'no epoch clock may be mixed into the CDP timebase');
   assert.equal(entry.durationMs, null, 'an unknown start must read as unknown, not as a negative age');
 });
+
+test('findChromePath prefers CHROME_PATH, then falls back to a PATH lookup', (t) => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { findChromePath, findOnPath } = require('../cdp');
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chrome-cdp-test-'));
+  const saved = { CHROME_PATH: process.env.CHROME_PATH, PATH: process.env.PATH };
+  t.after(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const explicit = path.join(dir, 'my-chrome');
+  fs.writeFileSync(explicit, '');
+  process.env.CHROME_PATH = explicit;
+  assert.equal(findChromePath(), explicit);
+
+  const binDir = path.join(dir, 'bin');
+  fs.mkdirSync(binDir);
+  const onPath = path.join(binDir, 'chromium');
+  fs.writeFileSync(onPath, '#!/bin/sh\n', { mode: 0o755 });
+  // A non-executable file with a Chrome name must not be picked on POSIX.
+  fs.writeFileSync(path.join(dir, 'google-chrome'), '', { mode: 0o644 });
+
+  const lookupPath = [path.join(dir, 'missing'), dir, binDir].join(path.delimiter);
+  const expected = process.platform === 'win32' ? path.join(dir, 'google-chrome') : onPath;
+  assert.equal(findOnPath(lookupPath), expected);
+  assert.equal(findOnPath(path.join(dir, 'missing')), null);
+});
+
+test('defaultUserDataDir keeps the automation profile out of tmp on every platform', () => {
+  const path = require('node:path');
+  const { defaultUserDataDir } = require('../cdp');
+  const home = '/home/alice';
+
+  assert.equal(
+    defaultUserDataDir({ platform: 'linux', env: { CHROME_USER_DATA_DIR: '/custom' }, home }),
+    '/custom',
+    'CHROME_USER_DATA_DIR always wins'
+  );
+  assert.equal(
+    defaultUserDataDir({ platform: 'linux', env: { XDG_DATA_HOME: '/xdg' }, home }),
+    path.join('/xdg', 'chrome-cdp', 'profile')
+  );
+  assert.equal(
+    defaultUserDataDir({ platform: 'linux', env: {}, home }),
+    path.join(home, '.local', 'share', 'chrome-cdp', 'profile')
+  );
+  assert.equal(
+    defaultUserDataDir({ platform: 'darwin', env: {}, home }),
+    path.join(home, 'Library', 'Application Support', 'chrome-cdp', 'profile')
+  );
+  assert.equal(
+    defaultUserDataDir({ platform: 'win32', env: { LOCALAPPDATA: 'C:\\Users\\alice\\AppData\\Local' }, home }),
+    'C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\AutomationProfile'
+  );
+});
+
+test('requiring index.js does not load webcrack or ast-grep until they are used', () => {
+  const { execFileSync } = require('node:child_process');
+  const path = require('node:path');
+
+  // Fresh process: this test file itself may have loaded modules into require.cache.
+  const script = `
+    const lib = require(${JSON.stringify(path.join(__dirname, '..', 'index.js'))});
+    const loaded = (name) => Object.keys(require.cache).some((k) => k.includes('node_modules/' + name + '/'));
+    const before = { webcrack: loaded('webcrack'), astGrep: loaded('@ast-grep') };
+    const exported = typeof lib.webcrack;
+    console.log(JSON.stringify({ before, exported, after: loaded('webcrack') }));
+  `;
+  const result = JSON.parse(execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' }));
+
+  assert.deepEqual(result.before, { webcrack: false, astGrep: false });
+  assert.equal(result.exported, 'function', 'the lazy getter still hands back webcrack');
+  assert.equal(result.after, true);
+});
+
+test('NetworkController evicts the oldest entries past maxEntries and counts them', async () => {
+  const NetworkController = require('../src/network-controller');
+
+  const cdp = new EventEmitter();
+  cdp.send = async () => ({});
+  const net = new NetworkController({}, cdp, { maxEntries: 3 });
+  await net.startRecording();
+
+  for (let i = 1; i <= 5; i++) {
+    cdp.emit('Network.requestWillBeSent', {
+      requestId: `R${i}`,
+      request: { url: `https://example.test/${i}`, method: 'GET', headers: {} },
+      type: 'XHR',
+      timestamp: i,
+    });
+  }
+
+  assert.deepEqual(
+    net.getTraffic().map((e) => e.id),
+    ['R3', 'R4', 'R5']
+  );
+  assert.equal(net.droppedCount, 2, 'the loss is reported, not silent');
+
+  net.clear();
+  assert.equal(net.droppedCount, 0);
+  assert.equal(new NetworkController({}, cdp).maxEntries, NetworkController.DEFAULT_MAX_ENTRIES);
+});
+
+test('WebSocketController caps frames per socket and sockets overall, reporting both', async () => {
+  const WebSocketController = require('../src/websocket-controller');
+
+  const cdp = new EventEmitter();
+  cdp.send = async () => ({});
+  const ws = new WebSocketController(cdp, { maxFramesPerSocket: 2, maxSockets: 2 });
+  await ws.startRecording();
+
+  cdp.emit('Network.webSocketCreated', { requestId: 'S1', url: 'wss://example.test/a' });
+  for (let i = 1; i <= 5; i++) {
+    cdp.emit('Network.webSocketFrameReceived', {
+      requestId: 'S1',
+      timestamp: i,
+      response: { opcode: 1, payloadData: `msg-${i}` },
+    });
+  }
+
+  const [socket] = ws.getSockets();
+  assert.deepEqual(
+    ws.getFrames('S1').map((f) => f.payloadData),
+    ['msg-4', 'msg-5']
+  );
+  assert.equal(socket.droppedFrames, 3);
+
+  cdp.emit('Network.webSocketCreated', { requestId: 'S2', url: 'wss://example.test/b' });
+  cdp.emit('Network.webSocketCreated', { requestId: 'S3', url: 'wss://example.test/c' });
+  assert.deepEqual(
+    ws.getSockets().map((s) => s.requestId),
+    ['S2', 'S3']
+  );
+  assert.equal(ws.droppedSockets, 1);
+  assert.equal(ws.getSockets()[0].droppedFrames, 0);
+});
+
+test('ConsoleController caps buffered logs and counts what it evicted', () => {
+  const cdp = new EventEmitter();
+  cdp.send = async () => ({});
+  const consoleCtl = new ConsoleController({}, cdp, { maxLogs: 2 });
+
+  for (let i = 1; i <= 4; i++) consoleCtl._pushLog({ type: 'log', text: `line ${i}` });
+
+  assert.deepEqual(
+    consoleCtl.getLogs().map((l) => l.text),
+    ['line 3', 'line 4']
+  );
+  assert.equal(consoleCtl.droppedCount, 2);
+});
+
+/** Asserts the fields HAR 1.2 marks required, so viewers that validate strictly accept the file. */
+function assertHar12(har) {
+  const { log } = har;
+  assert.equal(log.version, '1.2');
+  assert.ok(log.creator.name && log.creator.version);
+  for (const page of log.pages) {
+    for (const key of ['startedDateTime', 'id', 'title', 'pageTimings']) assert.ok(key in page, key);
+  }
+  for (const entry of log.entries) {
+    assert.ok(!Number.isNaN(Date.parse(entry.startedDateTime)), 'startedDateTime is ISO 8601');
+    assert.equal(typeof entry.time, 'number');
+    for (const key of ['method', 'url', 'httpVersion', 'cookies', 'headers', 'queryString', 'headersSize', 'bodySize']) {
+      assert.ok(key in entry.request, `request.${key}`);
+    }
+    for (const key of ['status', 'statusText', 'httpVersion', 'cookies', 'headers', 'content', 'redirectURL', 'headersSize', 'bodySize']) {
+      assert.ok(key in entry.response, `response.${key}`);
+    }
+    assert.equal(typeof entry.response.content.size, 'number');
+    assert.equal(typeof entry.response.content.mimeType, 'string');
+    assert.deepEqual(entry.cache, {});
+    for (const key of ['send', 'wait', 'receive']) assert.ok(entry.timings[key] >= 0, `timings.${key}`);
+    const phases = ['blocked', 'dns', 'connect', 'send', 'wait', 'receive'].map((k) => entry.timings[k]);
+    const sum = phases.filter((v) => v > 0).reduce((a, b) => a + b, 0);
+    assert.ok(Math.abs(entry.time - sum) < 0.01, `time ${entry.time} equals the phase sum ${sum}`);
+    for (const h of [...entry.request.headers, ...entry.response.headers]) {
+      assert.equal(typeof h.name, 'string');
+      assert.equal(typeof h.value, 'string');
+    }
+  }
+}
+
+test('buildHar maps redirects, POST bodies, cookies, timings, and missing bodies onto HAR 1.2', async () => {
+  const NetworkController = require('../src/network-controller');
+  const { buildHar } = require('../src/har');
+
+  const cdp = new EventEmitter();
+  cdp.send = async () => ({});
+  const net = new NetworkController({}, cdp);
+  await net.startRecording();
+
+  cdp.emit('Network.requestWillBeSent', {
+    requestId: 'R1',
+    request: {
+      url: 'https://example.test/login?next=%2Fhome&x=1',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: 'a=1; b=two' },
+      postData: 'user=alice',
+    },
+    type: 'Document',
+    timestamp: 100,
+    wallTime: 1_700_000_000,
+  });
+  cdp.emit('Network.requestWillBeSent', {
+    requestId: 'R1',
+    request: { url: 'https://example.test/home', method: 'GET', headers: {} },
+    type: 'Document',
+    timestamp: 100.2,
+    wallTime: 1_700_000_000.2,
+    redirectResponse: {
+      url: 'https://example.test/login?next=%2Fhome&x=1',
+      status: 302,
+      statusText: 'Found',
+      protocol: 'h2',
+      headers: {
+        location: '/home',
+        'set-cookie': 'sid=xyz; Path=/; HttpOnly; Secure; SameSite=Lax\ntheme=dark; Expires=Wed, 21 Oct 2037 07:28:00 GMT',
+      },
+    },
+  });
+  cdp.emit('Network.responseReceived', {
+    requestId: 'R1',
+    timestamp: 100.35,
+    response: {
+      status: 200,
+      statusText: 'OK',
+      protocol: 'h2',
+      mimeType: 'text/html',
+      headers: { 'content-type': 'text/html' },
+      remoteIPAddress: '93.184.216.34',
+      timing: {
+        requestTime: 100.21,
+        dnsStart: 1, dnsEnd: 5,
+        connectStart: 5, connectEnd: 40,
+        sslStart: 20, sslEnd: 40,
+        sendStart: 41, sendEnd: 42,
+        receiveHeadersEnd: 120,
+      },
+    },
+  });
+  cdp.emit('Network.loadingFinished', { requestId: 'R1', timestamp: 100.4, encodedDataLength: 500 });
+
+  cdp.emit('Network.requestWillBeSent', {
+    requestId: 'R2',
+    request: { url: 'https://example.test/logo.png', method: 'GET', headers: {} },
+    type: 'Image',
+    timestamp: 100.5,
+  });
+  cdp.emit('Network.responseReceived', {
+    requestId: 'R2',
+    timestamp: 100.6,
+    response: { status: 200, statusText: 'OK', mimeType: 'image/png', headers: {} },
+  });
+
+  cdp.emit('Network.requestWillBeSent', {
+    requestId: 'R3',
+    request: { url: 'https://blocked.test/ad.js', method: 'GET', headers: {} },
+    type: 'Script',
+    timestamp: 100.7,
+  });
+  cdp.emit('Network.loadingFailed', { requestId: 'R3', errorText: 'net::ERR_BLOCKED_BY_CLIENT' });
+
+  const bodies = new Map([
+    ['R1', { body: '<h1>hi</h1>', base64Encoded: false }],
+    ['R2', { body: Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString('base64'), base64Encoded: true }],
+    ['R1:redirect:0', { error: 'redirect hop, Chrome keeps no body' }],
+  ]);
+  const har = buildHar({
+    entries: net.getTraffic(),
+    bodies,
+    page: { title: 'Home' },
+    truncation: { droppedRequests: 0, droppedSockets: 0, droppedFrames: 0 },
+  });
+
+  assertHar12(har);
+  assert.equal(har.log.pages[0].title, 'Home');
+  assert.equal(har.log.comment, undefined, 'no truncation note when nothing was dropped');
+  assert.equal(har.log.entries.length, 4, 'both redirect hops, the image, and the blocked script');
+
+  const post = har.log.entries.find((e) => e.request.method === 'POST');
+  const logo = har.log.entries.find((e) => e.request.url.endsWith('logo.png'));
+  const blocked = har.log.entries.find((e) => e.request.url.startsWith('https://blocked.test'));
+  assert.equal(blocked.response._error, 'net::ERR_BLOCKED_BY_CLIENT');
+
+  assert.equal(post.startedDateTime, new Date(1_700_000_000_000).toISOString());
+  assert.equal(post.response.status, 302);
+  assert.equal(post.response.redirectURL, 'https://example.test/home');
+  assert.equal(post.response.httpVersion, 'HTTP/2');
+  assert.deepEqual(post.request.postData, { mimeType: 'application/x-www-form-urlencoded', text: 'user=alice' });
+  assert.equal(post.request.bodySize, 10);
+  assert.deepEqual(post.request.queryString, [{ name: 'next', value: '/home' }, { name: 'x', value: '1' }]);
+  assert.deepEqual(post.request.cookies, [{ name: 'a', value: '1' }, { name: 'b', value: 'two' }]);
+  assert.equal(post.response.headers.filter((h) => h.name === 'set-cookie').length, 2, 'folded Set-Cookie is split');
+  assert.deepEqual(post.response.cookies[0], { name: 'sid', value: 'xyz', path: '/', httpOnly: true, secure: true, sameSite: 'Lax' });
+  assert.equal(post.response.cookies[1].expires, '2037-10-21T07:28:00.000Z');
+  assert.match(post.response.content.comment, /redirect hop/);
+
+  const final = har.log.entries.find((e) => e.request.url === 'https://example.test/home');
+  assert.equal(final.response.content.text, '<h1>hi</h1>');
+  assert.equal(final.response.content.size, 11);
+  assert.equal(final.serverIPAddress, '93.184.216.34');
+  assert.equal(final.timings.dns, 4);
+  assert.equal(final.timings.connect, 35);
+  assert.equal(final.timings.ssl, 20);
+  assert.equal(final.timings.wait, 78);
+  assert.equal(final.time, 200, 'phases add back up to the recorded duration');
+
+  assert.equal(logo.response.content.encoding, 'base64');
+  assert.equal(logo.response.content.size, 4, 'size is the decoded byte count');
+  assert.equal(logo._resourceType, 'image');
+  assert.ok(!Number.isNaN(Date.parse(logo.startedDateTime)), 'mid-flight entry anchored to the wall clock');
+});
+
+test('buildHar reports truncation and blocked requests instead of implying a complete capture', async () => {
+  const NetworkController = require('../src/network-controller');
+  const { buildHar } = require('../src/har');
+
+  const cdp = new EventEmitter();
+  cdp.send = async () => ({});
+  const net = new NetworkController({}, cdp);
+  await net.startRecording();
+  cdp.emit('Network.requestWillBeSent', {
+    requestId: 'F1',
+    request: { url: 'https://blocked.test/ad.js', method: 'GET', headers: {} },
+    type: 'Script',
+    timestamp: 5,
+    wallTime: 1_700_000_000,
+  });
+  cdp.emit('Network.loadingFailed', { requestId: 'F1', errorText: 'net::ERR_BLOCKED_BY_CLIENT' });
+
+  const har = buildHar({ entries: net.getTraffic(), truncation: { droppedRequests: 7, droppedFrames: 0 } });
+  assertHar12(har);
+  assert.equal(har.log.entries[0].response.status, 0);
+  assert.equal(har.log.entries[0].response._error, 'net::ERR_BLOCKED_BY_CLIENT');
+  assert.equal(har.log._truncation.droppedRequests, 7);
+  assert.match(har.log.comment, /truncated/);
+});
+
+test('client.toHar skips body fetches for redirect hops and failures, and exports WebSocket frames', async () => {
+  const ChromeClient = require('../src/chrome-client');
+
+  const fetched = [];
+  const fake = {
+    network: {
+      droppedCount: 0,
+      getTraffic: () => [
+        { id: 'R1:redirect:0', cdpRequestId: 'R1', url: 'https://a.test/', method: 'GET', status: 301, redirectedTo: 'https://a.test/x' },
+        { id: 'R1', cdpRequestId: 'R1', url: 'https://a.test/x', method: 'GET', status: 200 },
+        { id: 'R2', cdpRequestId: 'R2', url: 'https://a.test/gone', method: 'GET', status: 200 },
+        { id: 'R3', cdpRequestId: 'R3', url: 'https://a.test/fail', method: 'GET', failed: true, errorText: 'net::ERR_FAILED' },
+      ],
+      getResponseBody: async (id) => {
+        fetched.push(id);
+        if (id === 'R2') throw new Error('No resource with given identifier found');
+        return { body: 'ok', base64Encoded: false };
+      },
+    },
+    websocket: {
+      droppedSockets: 0,
+      getSockets: () => [
+        {
+          requestId: 'W1',
+          url: 'wss://a.test/ws',
+          startTime: 1_700_000_000_000,
+          handshakeRequest: { headers: { Upgrade: 'websocket' }, wallTime: 1_700_000_000 },
+          handshakeResponse: { status: 101, statusText: 'Switching Protocols', headers: {} },
+          droppedFrames: 3,
+          frames: [
+            { direction: 'sent', wallTime: 1_700_000_001_000, opcode: 1, payloadData: '{"op":"sub"}' },
+            { direction: 'received', wallTime: 1_700_000_001_500, opcode: 1, payloadData: '{"ok":true}' },
+          ],
+        },
+      ],
+    },
+    title: async () => 'A',
+    page: { url: () => 'https://a.test/x' },
+  };
+
+  const har = await ChromeClient.prototype.toHar.call(fake);
+  assertHar12(har);
+  assert.deepEqual(fetched, ['R1', 'R2'], 'no body fetch for the redirect hop or the failed request');
+
+  const byUrl = (u) => har.log.entries.find((e) => e.request.url === u);
+  assert.equal(byUrl('https://a.test/x').response.content.text, 'ok');
+  assert.match(byUrl('https://a.test/gone').response.content.comment, /No resource with given identifier/);
+  assert.match(byUrl('https://a.test/').response.content.comment, /redirect hop/);
+
+  const ws = byUrl('wss://a.test/ws');
+  assert.equal(ws.response.status, 101);
+  assert.equal(ws._resourceType, 'websocket');
+  assert.deepEqual(ws._webSocketMessages, [
+    { type: 'send', time: 1_700_000_001, opcode: 1, data: '{"op":"sub"}' },
+    { type: 'receive', time: 1_700_000_001.5, opcode: 1, data: '{"ok":true}' },
+  ]);
+  assert.equal(ws._droppedFrames, 3);
+  assert.equal(har.log._truncation.droppedFrames, 3);
+
+  const noBodies = await ChromeClient.prototype.toHar.call(fake, { includeBodies: false });
+  assert.equal(fetched.length, 2, 'includeBodies: false fetches nothing');
+  assert.equal(noBodies.log.entries.length, har.log.entries.length);
+});
+
+test('buffer limits reject values that would silently disable or distort the cap', () => {
+  const ChromeClient = require('../src/chrome-client');
+  const cdp = new EventEmitter();
+  cdp.send = async () => ({});
+  const browser = Object.assign(new EventEmitter(), {
+    target: () => ({ createCDPSession: async () => ({ send: async () => ({}), detach: async () => {} }) }),
+    targets: () => [],
+  });
+
+  for (const bad of [NaN, 0, -1, 1.5, '5']) {
+    assert.throws(() => new ChromeClient(browser, {}, cdp, null, { maxEntries: bad }), /maxEntries must be a positive integer/);
+  }
+  const client = new ChromeClient(browser, {}, cdp, null, { maxEntries: 10, maxFramesPerSocket: Infinity });
+  assert.equal(client.network.maxEntries, 10);
+  assert.equal(client.websocket.maxFramesPerSocket, Infinity);
+  client.workers.close();
+});

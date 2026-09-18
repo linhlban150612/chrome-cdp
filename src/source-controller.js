@@ -3,8 +3,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const EventEmitter = require('node:events');
-const { webcrack } = require('webcrack');
-const { js } = require('@ast-grep/napi');
 const matchesQuery = require('./match-query');
 
 /**
@@ -243,6 +241,7 @@ class SourceController extends EventEmitter {
    */
   async deobfuscateBundle(scriptIdOrUrl, options = {}) {
     const { source, url, scriptId } = await this.getScriptSource(scriptIdOrUrl);
+    const { webcrack } = require('webcrack');
     const result = await webcrack(source, options);
 
     return {
@@ -266,6 +265,7 @@ class SourceController extends EventEmitter {
     const { source, url, scriptId } = await this.getScriptSource(scriptIdOrUrl);
     const resolvedDir = path.resolve(outputDirectory);
 
+    const { webcrack } = require('webcrack');
     const result = await webcrack(source, {
       unpack: true,
       deobfuscate: true,
@@ -306,6 +306,7 @@ class SourceController extends EventEmitter {
       code = src.source;
     }
 
+    const { js } = require('@ast-grep/napi');
     const tree = js.parse(code);
     const root = tree.root();
     const matchedNodes = root.findAll(pattern);
