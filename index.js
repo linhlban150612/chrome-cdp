@@ -30,7 +30,9 @@ const { waitUntil, assertEventually, waitForEvent } = require('./src/waiting');
 async function connect(options = {}) {
   const port = options.port || 9222;
 
-  if (options.autoLaunch !== false) {
+  // An explicit endpoint may be remote: probing and launching a local Chrome would be wrong.
+  const hasEndpoint = Boolean(options.browserURL || options.browserWSEndpoint);
+  if (options.autoLaunch !== false && !hasEndpoint) {
     const isReady = await checkCdpReady(port);
     if (!isReady) {
       await startChrome({ port, log: options.log });

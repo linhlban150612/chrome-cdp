@@ -28,7 +28,7 @@ const { connect, waitForEvent, waitUntil, assertEventually, startChrome, findChr
 | Option | Default | Notes |
 |---|---|---|
 | `port` | `9222` | CDP port |
-| `autoLaunch` | `true` | Launches Chrome if the port is not already answering |
+| `autoLaunch` | `true` | Launches Chrome if the port is not already answering. Skipped when `browserURL` or `browserWSEndpoint` is given |
 | `log` | `console.log` | Where auto-launch messages go. Pass `console.error` when stdout carries data (JSON, HAR) |
 | `browserURL` | `http://127.0.0.1:<port>` | Explicit HTTP endpoint |
 | `browserWSEndpoint` | — | Attach by WebSocket URL instead of port |
@@ -43,7 +43,7 @@ const { connect, waitForEvent, waitUntil, assertEventually, startChrome, findChr
 
 `webcrack` and `astGrep` are lazy exports: they are only loaded the first time they (or `deobfuscateBundle` / `unpackBundle` / `searchAst`) are used.
 
-`findChromePath()` checks `CHROME_PATH`, then the standard Windows, macOS, and Linux install paths, then `google-chrome`, `google-chrome-stable`, `chromium`, `chromium-browser`, and `chrome` on `PATH`. `defaultUserDataDir()` returns the automation profile path (`CHROME_USER_DATA_DIR` overrides it).
+`findChromePath()` (async) returns `CHROME_PATH` when set, otherwise the [CloakBrowser](https://github.com/CloakHQ/CloakBrowser) stealth Chromium, downloaded (~200MB) and cached under `~/.cloakbrowser` on first use. CloakBrowser launches add its default flags, including `--no-sandbox`. `defaultUserDataDir()` returns the automation profile path (`CHROME_USER_DATA_DIR` overrides it).
 
 ### Waiting
 
@@ -70,7 +70,7 @@ Ready means truthy, and for anything with a `.length` at least `min` items.
 
 **Proving a negative** needs a marker, not a long sleep. Wait for something the page reliably does that completes *after* the event you are checking for would have occurred, then report the absence together with the window it holds over: "no control frame across 630 frames / 76s", never "the server sends no PING". A predicate that cannot become true (`frames.length >= 100000` on a page that produces 700) is a fixed sleep in disguise and is worse than an honest one, because the next reader believes a condition was checked.
 
-Also exported: `startChrome({ port, log })`, `findChromePath()`, `checkCdpReady(port)` (resolves the `/json/version` payload or `null`), plus the raw `webcrack` and `astGrep` modules if you want to run them on code you obtained some other way.
+Also exported: `startChrome({ port, log })`, `findChromePath()` (async), `checkCdpReady(port)` (resolves the `/json/version` payload or `null`), plus the raw `webcrack` and `astGrep` modules if you want to run them on code you obtained some other way.
 
 ---
 

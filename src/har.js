@@ -12,6 +12,16 @@ const pkg = require('../package.json');
 const PAGE_ID = 'page_1';
 
 /**
+ * Whether a recorded request belongs in the HAR. data: URLs carry their own payload
+ * and never hit the network, so they are left out.
+ * @param {{ url?: string }} entry
+ * @returns {boolean}
+ */
+function isHarEntry(entry) {
+  return Boolean(entry.url) && !entry.url.startsWith('data:');
+}
+
+/**
  * @param {{
  *   entries: object[],
  *   sockets?: object[],
@@ -25,7 +35,7 @@ function buildHar({ entries, sockets = [], bodies = new Map(), page = {}, trunca
   const clock = createWallClock(entries);
 
   const harEntries = entries
-    .filter((entry) => entry.url && !entry.url.startsWith('data:'))
+    .filter(isHarEntry)
     .map((entry) => toHarEntry(entry, bodies.get(entry.id), clock));
   harEntries.push(...sockets.map(toHarSocketEntry));
   harEntries.sort((a, b) => Date.parse(a.startedDateTime) - Date.parse(b.startedDateTime));
@@ -335,4 +345,4 @@ function round(n) {
   return Math.round(n * 1000) / 1000;
 }
 
-module.exports = { buildHar };
+module.exports = { buildHar, isHarEntry };

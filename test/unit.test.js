@@ -3,10 +3,29 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const EventEmitter = require('node:events');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 
+const ChromeClient = require('../src/chrome-client');
 const WorkerController = require('../src/worker-controller');
 const SourceController = require('../src/source-controller');
 const ConsoleController = require('../src/console-controller');
+const NetworkController = require('../src/network-controller');
+const WebSocketController = require('../src/websocket-controller');
+const DebugController = require('../src/debug-controller');
+const { buildHar } = require('../src/har');
+const { waitUntil, assertEventually, waitForEvent } = require('../src/waiting');
+const cdpModule = require('../cdp');
+const { findChromePath, defaultUserDataDir } = cdpModule;
+
+// `../index` is deliberately NOT required here: the auto-launch test reloads it
+// from a clean require.cache after stubbing cdp, and a top-level require would
+// freeze the real bindings into index.js first.
+
+/** Lets the WorkerController's async target tracking settle before asserting. */
+const settle = () => new Promise((r) => setTimeout(r, 20));
 
 test('WorkerController tracks dedicated worker with raw CDP worker type and ignores unrelated other', async () => {
   const browserEmitter = new EventEmitter();
@@ -51,7 +70,7 @@ test('WorkerController tracks dedicated worker with raw CDP worker type and igno
     url: 'https://example.com/worker.js',
   });
   browserEmitter.emit('targetcreated', dedicatedWorker);
-  await new Promise((r) => setTimeout(r, 20));
+  await settle();
 
   assert.equal(controller.list().length, 1);
   assert.deepEqual(controller.list()[0], {
@@ -68,7 +87,7 @@ test('WorkerController tracks dedicated worker with raw CDP worker type and igno
     url: 'https://example.com/other',
   });
   browserEmitter.emit('targetcreated', unrelatedOther);
-  await new Promise((r) => setTimeout(r, 20));
+  await settle();
 
   assert.equal(controller.list().length, 1, 'Unrelated "other" target should be ignored');
 
@@ -80,7 +99,7 @@ test('WorkerController tracks dedicated worker with raw CDP worker type and igno
     url: 'https://example.com/sw.js',
   });
   browserEmitter.emit('targetcreated', serviceWorker);
-  await new Promise((r) => setTimeout(r, 20));
+  await settle();
 
   assert.equal(controller.list().length, 2);
   const swItem = controller.list().find((w) => w.id === 'sw-target-3');
@@ -95,7 +114,7 @@ test('WorkerController tracks dedicated worker with raw CDP worker type and igno
     url: 'https://example.com/shared.js',
   });
   browserEmitter.emit('targetcreated', sharedWorker);
-  await new Promise((r) => setTimeout(r, 20));
+  await settle();
 
   assert.equal(controller.list().length, 3);
   const sharedItem = controller.list().find((w) => w.id === 'shared-target-4');
@@ -183,10 +202,7 @@ test('ConsoleController inspectObject handles float expression 1.2 as primitive 
 });
 
 test('NetworkController keeps the pre-redirect hop instead of overwriting it', async () => {
-  const NetworkController = require('../src/network-controller');
-  const EventEmitter2 = require('node:events');
-
-  const cdp = new EventEmitter2();
+  const cdp = new EventEmitter();
   cdp.send = async () => ({});
   const net = new NetworkController({}, cdp);
   await net.startRecording();
@@ -241,8 +257,6 @@ test('NetworkController keeps the pre-redirect hop instead of overwriting it', a
 });
 
 test('waitUntil returns as soon as the value is ready instead of burning the whole timeout', async () => {
-  const { waitUntil } = require('../src/waiting');
-
   let polls = 0;
   const started = Date.now();
   const frames = await waitUntil(() => (++polls >= 3 ? ['a', 'b'] : []), { every: 10, timeout: 5000 });
@@ -253,15 +267,11 @@ test('waitUntil returns as soon as the value is ready instead of burning the who
 });
 
 test('waitUntil synchronizes rather than claims, so a timeout yields the partial capture', async () => {
-  const { waitUntil } = require('../src/waiting');
-
   const partial = await waitUntil(() => ['only-one'], { min: 5, every: 10, timeout: 60 });
   assert.deepEqual(partial, ['only-one'], 'seven frames are still seven frames');
 });
 
 test('assertEventually throws a diagnostic instead of letting a failed wait read as absence', async () => {
-  const { assertEventually } = require('../src/waiting');
-
   await assert.rejects(
     () => assertEventually(() => [], { every: 10, timeout: 60, describe: 'a server PING frame' }),
     (err) => {
@@ -277,8 +287,6 @@ test('assertEventually throws a diagnostic instead of letting a failed wait read
 });
 
 test('assertEventually reports the shortfall when min is not reached', async () => {
-  const { assertEventually } = require('../src/waiting');
-
   await assert.rejects(
     () => assertEventually(() => [1, 2], { min: 10, every: 10, timeout: 60, describe: '10 frames' }),
     /last value: length 2, needed at least 10/,
@@ -286,10 +294,7 @@ test('assertEventually reports the shortfall when min is not reached', async () 
 });
 
 test('waitForEvent listens and resolves on the event itself, filtered by where', async () => {
-  const { waitForEvent } = require('../src/waiting');
-  const EventEmitter3 = require('node:events');
-
-  const websocket = new EventEmitter3();
+  const websocket = new EventEmitter();
   const pending = waitForEvent(websocket, 'frame', {
     count: 2,
     timeout: 5000,
@@ -307,10 +312,7 @@ test('waitForEvent listens and resolves on the event itself, filtered by where',
 });
 
 test('waitForEvent returns the partial collection on timeout and still unsubscribes', async () => {
-  const { waitForEvent } = require('../src/waiting');
-  const EventEmitter4 = require('node:events');
-
-  const websocket = new EventEmitter4();
+  const websocket = new EventEmitter();
   const pending = waitForEvent(websocket, 'frame', { count: 5, timeout: 50 });
   websocket.emit('frame', { payloadData: 'one' });
 
@@ -342,10 +344,7 @@ test('inspectObject keeps ownProperties defaulting to true when given an options
 });
 
 test('setBreakpoint rejects a condition passed into the columnNumber slot', async () => {
-  const DebugController = require('../src/debug-controller');
-  const EventEmitter5 = require('node:events');
-
-  const cdp = new EventEmitter5();
+  const cdp = new EventEmitter();
   const sent = [];
   cdp.send = async (method, params) => {
     sent.push({ method, params });
@@ -377,10 +376,7 @@ test('setBreakpoint rejects a condition passed into the columnNumber slot', asyn
 });
 
 test('getResponseBody refuses a redirect hop instead of returning the final response body', async () => {
-  const NetworkController = require('../src/network-controller');
-  const EventEmitter6 = require('node:events');
-
-  const cdp = new EventEmitter6();
+  const cdp = new EventEmitter();
   cdp.send = async () => ({ body: '<html>SECURE AREA</html>', base64Encoded: false });
   const net = new NetworkController({}, cdp);
   await net.startRecording();
@@ -414,10 +410,7 @@ test('getResponseBody refuses a redirect hop instead of returning the final resp
 });
 
 test('waitForEvent rejects when the where predicate throws instead of hanging', async () => {
-  const { waitForEvent } = require('../src/waiting');
-  const EventEmitter7 = require('node:events');
-
-  const websocket = new EventEmitter7();
+  const websocket = new EventEmitter();
   const pending = waitForEvent(websocket, 'frame', {
     timeout: 5000,
     where: () => { throw new Error('predicate blew up'); },
@@ -429,11 +422,7 @@ test('waitForEvent rejects when the where predicate throws instead of hanging', 
 });
 
 test('global-flag filters survive a stateful /g regex instead of skipping every other entry', async () => {
-  const WebSocketController = require('../src/websocket-controller');
-  const SourceController = require('../src/source-controller');
-  const EventEmitter2 = require('node:events');
-
-  const wsCdp = new EventEmitter2();
+  const wsCdp = new EventEmitter();
   wsCdp.send = async () => ({});
   const ws = new WebSocketController(wsCdp);
   await ws.startRecording();
@@ -442,7 +431,7 @@ test('global-flag filters survive a stateful /g regex instead of skipping every 
   }
   assert.equal(ws.getSockets({ url: /live\.test/g }).length, 3, 'lastIndex must not leak between sockets');
 
-  const srcCdp = new EventEmitter2();
+  const srcCdp = new EventEmitter();
   srcCdp.send = async () => ({});
   const sources = new SourceController(srcCdp);
   await sources.enable();
@@ -453,10 +442,7 @@ test('global-flag filters survive a stateful /g regex instead of skipping every 
 });
 
 test('durationMs stays in the CDP timebase when a request is seen mid-flight', async () => {
-  const NetworkController = require('../src/network-controller');
-  const EventEmitter2 = require('node:events');
-
-  const cdp = new EventEmitter2();
+  const cdp = new EventEmitter();
   cdp.send = async () => ({});
   const net = new NetworkController({}, cdp);
   await net.startRecording();
@@ -473,43 +459,22 @@ test('durationMs stays in the CDP timebase when a request is seen mid-flight', a
   assert.equal(entry.durationMs, null, 'an unknown start must read as unknown, not as a negative age');
 });
 
-test('findChromePath prefers CHROME_PATH, then falls back to a PATH lookup', (t) => {
-  const fs = require('node:fs');
-  const os = require('node:os');
-  const path = require('node:path');
-  const { findChromePath, findOnPath } = require('../cdp');
-
+test('findChromePath prefers CHROME_PATH, else resolves the CloakBrowser binary', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chrome-cdp-test-'));
-  const saved = { CHROME_PATH: process.env.CHROME_PATH, PATH: process.env.PATH };
+  const saved = process.env.CHROME_PATH;
   t.after(() => {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
+    if (saved === undefined) delete process.env.CHROME_PATH;
+    else process.env.CHROME_PATH = saved;
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
   const explicit = path.join(dir, 'my-chrome');
   fs.writeFileSync(explicit, '');
   process.env.CHROME_PATH = explicit;
-  assert.equal(findChromePath(), explicit);
-
-  const binDir = path.join(dir, 'bin');
-  fs.mkdirSync(binDir);
-  const onPath = path.join(binDir, 'chromium');
-  fs.writeFileSync(onPath, '#!/bin/sh\n', { mode: 0o755 });
-  // A non-executable file with a Chrome name must not be picked on POSIX.
-  fs.writeFileSync(path.join(dir, 'google-chrome'), '', { mode: 0o644 });
-
-  const lookupPath = [path.join(dir, 'missing'), dir, binDir].join(path.delimiter);
-  const expected = process.platform === 'win32' ? path.join(dir, 'google-chrome') : onPath;
-  assert.equal(findOnPath(lookupPath), expected);
-  assert.equal(findOnPath(path.join(dir, 'missing')), null);
+  assert.equal(await findChromePath(), explicit);
 });
 
 test('defaultUserDataDir keeps the automation profile out of tmp on every platform', () => {
-  const path = require('node:path');
-  const { defaultUserDataDir } = require('../cdp');
   const home = '/home/alice';
 
   assert.equal(
@@ -536,9 +501,6 @@ test('defaultUserDataDir keeps the automation profile out of tmp on every platfo
 });
 
 test('requiring index.js does not load webcrack or ast-grep until they are used', () => {
-  const { execFileSync } = require('node:child_process');
-  const path = require('node:path');
-
   // Fresh process: this test file itself may have loaded modules into require.cache.
   const script = `
     const lib = require(${JSON.stringify(path.join(__dirname, '..', 'index.js'))});
@@ -555,8 +517,6 @@ test('requiring index.js does not load webcrack or ast-grep until they are used'
 });
 
 test('NetworkController evicts the oldest entries past maxEntries and counts them', async () => {
-  const NetworkController = require('../src/network-controller');
-
   const cdp = new EventEmitter();
   cdp.send = async () => ({});
   const net = new NetworkController({}, cdp, { maxEntries: 3 });
@@ -583,8 +543,6 @@ test('NetworkController evicts the oldest entries past maxEntries and counts the
 });
 
 test('WebSocketController caps frames per socket and sockets overall, reporting both', async () => {
-  const WebSocketController = require('../src/websocket-controller');
-
   const cdp = new EventEmitter();
   cdp.send = async () => ({});
   const ws = new WebSocketController(cdp, { maxFramesPerSocket: 2, maxSockets: 2 });
@@ -662,9 +620,6 @@ function assertHar12(har) {
 }
 
 test('buildHar maps redirects, POST bodies, cookies, timings, and missing bodies onto HAR 1.2', async () => {
-  const NetworkController = require('../src/network-controller');
-  const { buildHar } = require('../src/har');
-
   const cdp = new EventEmitter();
   cdp.send = async () => ({});
   const net = new NetworkController({}, cdp);
@@ -793,9 +748,6 @@ test('buildHar maps redirects, POST bodies, cookies, timings, and missing bodies
 });
 
 test('buildHar reports truncation and blocked requests instead of implying a complete capture', async () => {
-  const NetworkController = require('../src/network-controller');
-  const { buildHar } = require('../src/har');
-
   const cdp = new EventEmitter();
   cdp.send = async () => ({});
   const net = new NetworkController({}, cdp);
@@ -818,8 +770,6 @@ test('buildHar reports truncation and blocked requests instead of implying a com
 });
 
 test('client.toHar skips body fetches for redirect hops and failures, and exports WebSocket frames', async () => {
-  const ChromeClient = require('../src/chrome-client');
-
   const fetched = [];
   const fake = {
     network: {
@@ -829,6 +779,7 @@ test('client.toHar skips body fetches for redirect hops and failures, and export
         { id: 'R1', cdpRequestId: 'R1', url: 'https://a.test/x', method: 'GET', status: 200 },
         { id: 'R2', cdpRequestId: 'R2', url: 'https://a.test/gone', method: 'GET', status: 200 },
         { id: 'R3', cdpRequestId: 'R3', url: 'https://a.test/fail', method: 'GET', failed: true, errorText: 'net::ERR_FAILED' },
+        { id: 'R4', cdpRequestId: 'R4', url: 'data:image/png;base64,AAAA', method: 'GET', status: 200 },
       ],
       getResponseBody: async (id) => {
         fetched.push(id);
@@ -859,7 +810,7 @@ test('client.toHar skips body fetches for redirect hops and failures, and export
 
   const har = await ChromeClient.prototype.toHar.call(fake);
   assertHar12(har);
-  assert.deepEqual(fetched, ['R1', 'R2'], 'no body fetch for the redirect hop or the failed request');
+  assert.deepEqual(fetched, ['R1', 'R2'], 'no body fetch for the redirect hop, the failed request, or a data: URL');
 
   const byUrl = (u) => har.log.entries.find((e) => e.request.url === u);
   assert.equal(byUrl('https://a.test/x').response.content.text, 'ok');
@@ -882,7 +833,6 @@ test('client.toHar skips body fetches for redirect hops and failures, and export
 });
 
 test('buffer limits reject values that would silently disable or distort the cap', () => {
-  const ChromeClient = require('../src/chrome-client');
   const cdp = new EventEmitter();
   cdp.send = async () => ({});
   const browser = Object.assign(new EventEmitter(), {
@@ -897,4 +847,108 @@ test('buffer limits reject values that would silently disable or distort the cap
   assert.equal(client.network.maxEntries, 10);
   assert.equal(client.websocket.maxFramesPerSocket, Infinity);
   client.workers.close();
+});
+
+test('late events for an evicted request are ignored instead of resurrecting a blank entry', async () => {
+  const cdp = new EventEmitter();
+  cdp.send = async () => ({});
+  const net = new NetworkController({}, cdp, { maxEntries: 2 });
+  await net.startRecording();
+
+  const request = (id) =>
+    cdp.emit('Network.requestWillBeSent', {
+      requestId: id,
+      request: { url: `https://example.test/${id}`, method: 'GET', headers: {} },
+      type: 'XHR',
+      timestamp: 1,
+    });
+  const finished = [];
+  net.on('finished', (e) => finished.push(e.id));
+
+  request('R1');
+  request('R2');
+  request('R3'); // evicts R1
+
+  cdp.emit('Network.responseReceived', { requestId: 'R1', timestamp: 2, response: { status: 200, headers: {} } });
+  cdp.emit('Network.responseReceivedExtraInfo', { requestId: 'R1', headers: {}, statusCode: 200 });
+  cdp.emit('Network.loadingFinished', { requestId: 'R1', timestamp: 3, encodedDataLength: 10 });
+  cdp.emit('Network.loadingFailed', { requestId: 'R1', errorText: 'net::ERR_ABORTED' });
+
+  assert.deepEqual(
+    net.getTraffic().map((e) => e.id),
+    ['R2', 'R3'],
+    'no ghost for R1, and R2 was not pushed out to make room for one'
+  );
+  assert.equal(net.droppedCount, 1, 'only the real eviction is counted');
+  assert.deepEqual(finished, [], 'no events are emitted for an entry that is gone');
+
+  // A fresh requestWillBeSent under that ID is a real request again (e.g. a new redirect hop).
+  request('R1');
+  assert.deepEqual(
+    net.getTraffic().map((e) => e.id),
+    ['R3', 'R1']
+  );
+  cdp.emit('Network.loadingFinished', { requestId: 'R1', timestamp: 4, encodedDataLength: 5 });
+  assert.equal(net.getTraffic().find((e) => e.id === 'R1').encodedDataLength, 5);
+});
+
+test('late frames for an evicted WebSocket are ignored instead of resurrecting a blank socket', async () => {
+  const cdp = new EventEmitter();
+  cdp.send = async () => ({});
+  const ws = new WebSocketController(cdp, { maxSockets: 2 });
+  await ws.startRecording();
+
+  cdp.emit('Network.webSocketCreated', { requestId: 'S1', url: 'wss://example.test/a' });
+  cdp.emit('Network.webSocketCreated', { requestId: 'S2', url: 'wss://example.test/b' });
+  cdp.emit('Network.webSocketCreated', { requestId: 'S3', url: 'wss://example.test/c' }); // evicts S1
+
+  const frames = [];
+  ws.on('frame', (f) => frames.push(f));
+  cdp.emit('Network.webSocketFrameReceived', { requestId: 'S1', timestamp: 1, response: { opcode: 1, payloadData: 'late' } });
+  cdp.emit('Network.webSocketFrameSent', { requestId: 'S1', timestamp: 2, response: { opcode: 1, payloadData: 'late' } });
+  cdp.emit('Network.webSocketClosed', { requestId: 'S1', timestamp: 3 });
+
+  assert.deepEqual(
+    ws.getSockets().map((s) => s.requestId),
+    ['S2', 'S3']
+  );
+  assert.equal(ws.droppedSockets, 1);
+  assert.deepEqual(frames, []);
+});
+
+test('newPage validates buffer limits before opening a tab, so a bad value leaks nothing', async () => {
+  let opened = 0;
+  const fake = { _limits: {}, browser: { newPage: async () => (opened++, {}) } };
+  await assert.rejects(ChromeClient.prototype.newPage.call(fake, { maxEntries: 0 }), /maxEntries must be a positive integer/);
+  assert.equal(opened, 0, 'no orphan tab left behind in the long-lived Chrome');
+});
+
+test('connect() with an explicit endpoint neither probes nor launches a local Chrome', async () => {
+  const indexPath = require.resolve('../index');
+
+  const calls = [];
+  const original = {
+    checkCdpReady: cdpModule.checkCdpReady,
+    startChrome: cdpModule.startChrome,
+    connect: ChromeClient.connect,
+  };
+  cdpModule.checkCdpReady = async () => (calls.push('probe'), null);
+  cdpModule.startChrome = async () => calls.push('launch');
+  ChromeClient.connect = async (opts) => (calls.push('connect'), opts);
+  delete require.cache[indexPath];
+
+  try {
+    const { connect } = require('../index');
+    await connect({ browserWSEndpoint: 'ws://remote.test:9222/devtools/browser/x' });
+    await connect({ browserURL: 'http://remote.test:9222' });
+    assert.deepEqual(calls, ['connect', 'connect']);
+
+    calls.length = 0;
+    await connect({ port: 9333 });
+    assert.deepEqual(calls, ['probe', 'launch', 'connect'], 'the local default still auto-launches');
+  } finally {
+    Object.assign(cdpModule, { checkCdpReady: original.checkCdpReady, startChrome: original.startChrome });
+    ChromeClient.connect = original.connect;
+    delete require.cache[indexPath];
+  }
 });

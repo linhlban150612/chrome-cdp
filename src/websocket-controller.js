@@ -25,6 +25,12 @@ class WebSocketController extends EventEmitter {
     this.maxSockets = options.maxSockets ?? WebSocketController.DEFAULT_MAX_SOCKETS;
     /** Sockets evicted to honor maxSockets. Per-socket frame loss is in `socket.droppedFrames`. */
     this.droppedSockets = 0;
+    /**
+     * Sockets evicted for maxSockets. Their late frames and close events are ignored:
+     * recreating the socket would store a blank ghost and evict one more live socket.
+     * @type {Set<string>}
+     */
+    this._evictedIds = new Set();
 
     this._onSocketCreated = this._onSocketCreated.bind(this);
     this._onHandshakeReq = this._onHandshakeReq.bind(this);
@@ -77,6 +83,7 @@ class WebSocketController extends EventEmitter {
    */
   clear() {
     this._sockets.clear();
+    this._evictedIds.clear();
     this.droppedSockets = 0;
   }
 
@@ -175,7 +182,13 @@ class WebSocketController extends EventEmitter {
   _getOrCreateSocket(requestId, url = '') {
     if (!this._sockets.has(requestId)) {
       while (this._sockets.size >= this.maxSockets && this._sockets.size > 0) {
-        this._sockets.delete(this._sockets.keys().next().value);
+        const oldest = this._sockets.keys().next().value;
+        this._sockets.delete(oldest);
+        this._evictedIds.add(oldest);
+        // Only recently evicted sockets still receive events, so the tombstones stay bounded too.
+        if (this._evictedIds.size > this.maxSockets) {
+          this._evictedIds.delete(this._evictedIds.values().next().value);
+        }
         this.droppedSockets++;
       }
       this._sockets.set(requestId, {
@@ -193,6 +206,14 @@ class WebSocketController extends EventEmitter {
       });
     }
     return this._sockets.get(requestId);
+  }
+
+  /**
+   * Socket for a follow-up event, or null when that socket was already evicted.
+   * @private
+   */
+  _socketForEvent(requestId) {
+    return this._evictedIds.has(requestId) ? null : this._getOrCreateSocket(requestId);
   }
 
   /**
@@ -224,6 +245,7 @@ class WebSocketController extends EventEmitter {
    * @private
    */
   _onSocketCreated(event) {
+    this._evictedIds.delete(event.requestId);
     const sock = this._getOrCreateSocket(event.requestId, event.url);
     sock.url = event.url;
     sock.initiator = event.initiator || null;
@@ -234,7 +256,8 @@ class WebSocketController extends EventEmitter {
    * @private
    */
   _onHandshakeReq(event) {
-    const sock = this._getOrCreateSocket(event.requestId);
+    const sock = this._socketForEvent(event.requestId);
+    if (!sock) return;
     sock.handshakeRequest = {
       headers: event.request?.headers || {},
       wallTime: event.wallTime || Date.now() / 1000,
@@ -246,7 +269,8 @@ class WebSocketController extends EventEmitter {
    * @private
    */
   _onHandshakeRes(event) {
-    const sock = this._getOrCreateSocket(event.requestId);
+    const sock = this._socketForEvent(event.requestId);
+    if (!sock) return;
     sock.state = 'open';
     sock.handshakeResponse = {
       status: event.response?.status,
@@ -261,7 +285,8 @@ class WebSocketController extends EventEmitter {
    * @private
    */
   _onFrameSent(event) {
-    const sock = this._getOrCreateSocket(event.requestId);
+    const sock = this._socketForEvent(event.requestId);
+    if (!sock) return;
     const frameData = event.response;
     const entry = {
       requestId: event.requestId,
@@ -284,7 +309,8 @@ class WebSocketController extends EventEmitter {
    * @private
    */
   _onFrameRecv(event) {
-    const sock = this._getOrCreateSocket(event.requestId);
+    const sock = this._socketForEvent(event.requestId);
+    if (!sock) return;
     const frameData = event.response;
     const entry = {
       requestId: event.requestId,
@@ -307,7 +333,8 @@ class WebSocketController extends EventEmitter {
    * @private
    */
   _onFrameError(event) {
-    const sock = this._getOrCreateSocket(event.requestId);
+    const sock = this._socketForEvent(event.requestId);
+    if (!sock) return;
     sock.state = 'error';
     sock.errorMessage = event.errorMessage;
     this.emit('socketError', { requestId: event.requestId, errorMessage: event.errorMessage });
@@ -320,7 +347,8 @@ class WebSocketController extends EventEmitter {
    * @private
    */
   _onSocketClosed(event) {
-    const sock = this._getOrCreateSocket(event.requestId);
+    const sock = this._socketForEvent(event.requestId);
+    if (!sock) return;
     sock.state = 'closed';
     sock.endTime = Date.now();
     this.emit('socketClosed', { requestId: event.requestId, timestamp: event.timestamp });

@@ -14,7 +14,7 @@ Commands:
   start                         Start Chrome with remote debugging on port 9222
   markdown <url> [destFile]     Extract article content as clean Markdown (GFM)
   dump-forms <url>              Audit all forms, methods, actions, and inputs (inc. hidden)
-  dump-storage <url>            Dump localStorage and sessionStorage from target URL
+  dump-storage <url>            Dump localStorage, sessionStorage, and cookies from target URL
   listeners <url> [selector]    Audit event listeners on target selector or 'window'
   search-sources <url> <query>  Search for string/regex across all loaded script bundles
   download-bundle <url> <queryOrId> <destFile>

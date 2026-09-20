@@ -27,6 +27,12 @@ class NetworkController extends EventEmitter {
     this.maxEntries = options.maxEntries ?? NetworkController.DEFAULT_MAX_ENTRIES;
     /** Entries evicted to honor maxEntries. Non-zero means the capture was truncated. */
     this.droppedCount = 0;
+    /**
+     * Keys evicted for maxEntries. Late events for them (responseReceived, loadingFinished…)
+     * are ignored: recreating the entry would store a blank ghost and evict one more live entry.
+     * @type {Set<string>}
+     */
+    this._evictedIds = new Set();
 
     this._onRequestWillBeSent = this._onRequestWillBeSent.bind(this);
     this._onRequestExtraInfo = this._onRequestExtraInfo.bind(this);
@@ -75,6 +81,7 @@ class NetworkController extends EventEmitter {
    */
   clear() {
     this._entries.clear();
+    this._evictedIds.clear();
     this.droppedCount = 0;
   }
 
@@ -377,13 +384,27 @@ class NetworkController extends EventEmitter {
   }
 
   /**
+   * Entry for a follow-up event, or null when that request was already evicted.
+   * @private
+   */
+  _entryForEvent(id) {
+    return this._evictedIds.has(id) ? null : this._getOrCreateEntry(id);
+  }
+
+  /**
    * Makes room for one more entry. Map iteration is insertion order, so the first key
    * is the oldest request.
    * @private
    */
   _evictOldest() {
     while (this._entries.size >= this.maxEntries && this._entries.size > 0) {
-      this._entries.delete(this._entries.keys().next().value);
+      const oldest = this._entries.keys().next().value;
+      this._entries.delete(oldest);
+      this._evictedIds.add(oldest);
+      // Only recently evicted IDs still receive events, so the tombstones stay bounded too.
+      if (this._evictedIds.size > this.maxEntries) {
+        this._evictedIds.delete(this._evictedIds.values().next().value);
+      }
       this.droppedCount++;
     }
   }
@@ -424,6 +445,8 @@ class NetworkController extends EventEmitter {
   _onRequestWillBeSent(event) {
     const redirectIndex = this._preserveRedirectedHop(event);
 
+    // The creation event: a new hop of an evicted chain is a real request, so record it.
+    this._evictedIds.delete(event.requestId);
     const entry = this._getOrCreateEntry(event.requestId);
     entry.redirectIndex = redirectIndex;
     entry.redirectedFrom = event.redirectResponse?.url || null;
@@ -443,7 +466,8 @@ class NetworkController extends EventEmitter {
    * @private
    */
   _onRequestExtraInfo(event) {
-    const entry = this._getOrCreateEntry(event.requestId);
+    const entry = this._entryForEvent(event.requestId);
+    if (!entry) return;
     entry.rawHeaders = event.headers;
     entry.associatedCookies = event.associatedCookies || [];
     entry.clientSecurityState = event.clientSecurityState || null;
@@ -453,7 +477,8 @@ class NetworkController extends EventEmitter {
    * @private
    */
   _onResponseReceived(event) {
-    const entry = this._getOrCreateEntry(event.requestId);
+    const entry = this._entryForEvent(event.requestId);
+    if (!entry) return;
     const resp = event.response;
     entry.status = resp.status;
     entry.statusText = resp.statusText;
@@ -476,7 +501,8 @@ class NetworkController extends EventEmitter {
    * @private
    */
   _onResponseExtraInfo(event) {
-    const entry = this._getOrCreateEntry(event.requestId);
+    const entry = this._entryForEvent(event.requestId);
+    if (!entry) return;
     entry.rawResponseHeaders = event.headers;
     entry.rawResponseHeadersText = event.headersText || null;
     entry.rawStatusCode = event.statusCode;
@@ -486,7 +512,8 @@ class NetworkController extends EventEmitter {
    * @private
    */
   _onLoadingFinished(event) {
-    const entry = this._getOrCreateEntry(event.requestId);
+    const entry = this._entryForEvent(event.requestId);
+    if (!entry) return;
     entry.encodedDataLength = event.encodedDataLength;
     if (entry.startTime) {
       entry.durationMs = Math.round(event.timestamp * 1000 - entry.startTime);
@@ -498,7 +525,8 @@ class NetworkController extends EventEmitter {
    * @private
    */
   _onLoadingFailed(event) {
-    const entry = this._getOrCreateEntry(event.requestId);
+    const entry = this._entryForEvent(event.requestId);
+    if (!entry) return;
     entry.failed = true;
     entry.errorText = event.errorText || 'Loading failed';
     entry.canceled = event.canceled || false;

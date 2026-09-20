@@ -34,6 +34,7 @@
     "@ast-grep/napi": "0.45.3",
     "@mozilla/readability": "0.6.0",
     "cheerio": "1.2.0",
+    "cloakbrowser": "0.5.10",
     "jsdom": "30.0.1",
     "puppeteer-core": "25.10.0",
     "puppeteer-extra": "3.3.6",

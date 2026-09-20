@@ -11,7 +11,7 @@ const SourceController = require('./source-controller');
 const WorkerController = require('./worker-controller');
 const DebugController = require('./debug-controller');
 const PerformanceController = require('./performance-controller');
-const { buildHar } = require('./har');
+const { buildHar, isHarEntry } = require('./har');
 
 // Register stealth plugin once globally on puppeteer-extra
 puppeteer.use(StealthPlugin());
@@ -78,6 +78,8 @@ class ChromeClient {
    * @returns {Promise<ChromeClient>}
    */
   static async connect(options = {}) {
+    // Validate before attaching: a throw after newPage() would orphan the tab.
+    const limits = pickLimits(options);
     const browserURL =
       options.browserURL ||
       (options.browserWSEndpoint ? undefined : `http://127.0.0.1:${options.port || 9222}`);
@@ -103,7 +105,7 @@ class ChromeClient {
     }
     const cdp = await page.createCDPSession();
 
-    const client = new ChromeClient(browser, page, cdp, null, options);
+    const client = new ChromeClient(browser, page, cdp, null, limits);
     await client.workers.ready;
 
     // Auto-enable standard controllers if requested (default: true)
@@ -126,9 +128,10 @@ class ChromeClient {
    * @returns {Promise<ChromeClient>}
    */
   async newPage(options = {}) {
+    // Validate before opening the tab: a throw after newPage() would orphan it.
+    const limits = { ...this._limits, ...pickLimits(options) };
     const page = await this.browser.newPage();
     const cdp = await page.createCDPSession();
-    const limits = { ...this._limits, ...pickLimits(options) };
     const client = new ChromeClient(this.browser, page, cdp, this.workers, limits);
     await client.workers.ready;
 
@@ -255,7 +258,8 @@ class ChromeClient {
 
     if (options.includeBodies !== false) {
       for (const entry of entries) {
-        if (entry.failed) continue;
+        // Skip what buildHar drops anyway (data: URLs) instead of paying a CDP round-trip each.
+        if (entry.failed || !isHarEntry(entry)) continue;
         if (entry.id !== entry.cdpRequestId) {
           bodies.set(entry.id, { error: 'redirect hop, Chrome keeps no body' });
           continue;
