@@ -952,3 +952,58 @@ test('connect() with an explicit endpoint neither probes nor launches a local Ch
     delete require.cache[indexPath];
   }
 });
+
+test('cli parses --keep-open and --wait without consuming a positional slot', () => {
+  const cli = require('../cli');
+
+  const plain = cli.parseGlobalOptions(['eval', 'a + b']);
+  assert.equal(plain.keepOpen, false);
+  assert.equal(plain.waitMs, 0);
+  assert.deepEqual(plain.positional, ['eval', 'a + b']);
+
+  const flagged = cli.parseGlobalOptions(['traffic', '-', '--keep-open', '--wait', '2500', '--json']);
+  assert.equal(flagged.keepOpen, true);
+  assert.equal(flagged.waitMs, 2500);
+  assert.equal(flagged.isJson, true);
+  // The dash is the target, so it must survive as a positional and not read as a flag.
+  assert.deepEqual(flagged.positional, ['traffic', '-']);
+
+  assert.throws(() => cli.parseGlobalOptions(['traffic', 'x', '--wait', '-1']), /non-negative/);
+  assert.throws(() => cli.parseGlobalOptions(['traffic', 'x', '--wait', 'soon']), /non-negative/);
+});
+
+test('cli treats only a bare dash as attach, and names a HAR even without a usable URL', () => {
+  const cli = require('../cli');
+
+  assert.equal(cli.isAttach('-'), true);
+  assert.equal(cli.isAttach('--json'), false);
+  assert.equal(cli.isAttach('https://target.com'), false);
+  assert.equal(cli.isAttach(undefined), false);
+
+  assert.equal(cli.harName('https://target.com/login?a=1'), 'target.com.har');
+  // An attached page can be about:blank or a file URL; a default name must still come out.
+  assert.equal(cli.harName('about:blank'), 'capture.har');
+  assert.equal(cli.harName('-'), 'capture.har');
+});
+
+test('cli eval reads its expression from -f, from stdin, and from argv', async () => {
+  const cli = require('../cli');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cdp-cli-'));
+  const file = path.join(dir, 'expr.js');
+  fs.writeFileSync(file, 'window.sign("x")\n');
+
+  try {
+    assert.equal(await cli.readExpression(['-f', file]), 'window.sign("x")');
+    assert.equal(await cli.readExpression(['--file', file]), 'window.sign("x")');
+    // Joined back together: an unquoted expression arrives as several argv slots.
+    assert.equal(await cli.readExpression(['document.title', '+', '1']), 'document.title + 1');
+    await assert.rejects(() => cli.readExpression(['-f']), /needs a file path/);
+    assert.equal(
+      await cli.readExpression([], { isTty: true }),
+      '',
+      'an interactive shell must report the missing expression, not block on stdin'
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
