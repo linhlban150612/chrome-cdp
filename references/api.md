@@ -236,7 +236,9 @@ Worth checking when a site's crypto or network code is not in the main bundle �
 
 ## CLI commands
 
-`node cli.js --help` prints the authoritative list. Each command is a full connect → goto → act → closePage cycle.
+`node cli.js --help` prints the authoritative list. By default each command is a full connect → goto → act → closePage cycle.
+
+Any `<url>` slot accepts `-`, meaning "the tab that is already open": the command skips navigation, so the page keeps its login, route and `scriptId`s, and the page is left open afterwards. `session <url>` exists to create that tab. Recording is per-process, so an attached `traffic`/`har` covers only what happens after it connects, and both report that in `scope`.
 
 | Command | Notes |
 |---|---|
@@ -251,8 +253,9 @@ Worth checking when a site's crypto or network code is not in the main bundle �
 | `unpack <url> <queryOrId> <destDir>` | |
 | `ast-search <url> <queryOrId> <pattern>` | |
 | `screenshot <url> [destFile]` | `--viewport WxH`, `--fullPage` |
-| `traffic <url> [--json]` | HTTP + WebSocket summary for the page load. JSON output carries a `truncation` object (`droppedRequests`, `droppedSockets`, `droppedFrames`) |
-| `har <url> [destFile] [--no-bodies]` | HAR 1.2 export of the page load (waits for `networkidle2`). Defaults to `<host>.har`; `-` writes to stdout with launch logs moved to stderr |
-| `eval <expression>` | Does **not** navigate — runs against the currently open tab |
+| `traffic <url> [--json]` | HTTP + WebSocket summary for the page load. JSON output carries a `truncation` object (`droppedRequests`, `droppedSockets`, `droppedFrames`) and a `scope` object (`startedAt`, `waitedMs`, `note`) |
+| `har <url> [destFile] [--no-bodies]` | HAR 1.2 export of the page load (waits for `networkidle2`). Defaults to `<host>.har`; `-` in the *destFile* slot writes to stdout with launch logs moved to stderr. Window recorded is in `log._scope` |
+| `eval [expression]` | Does **not** navigate — runs against the currently open tab. `-f <path>` reads the expression from a file, `-f -` or a pipe reads stdin |
+| `session <url>` | Loads the page and leaves the tab open for later `-` commands |
 
-Global flags: `--port <n>`, `--json`, `--help`.
+Global flags: `--port <n>`, `--json`, `--keep-open`, `--wait <ms>` (traffic/har), `--help`.

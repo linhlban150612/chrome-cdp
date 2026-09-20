@@ -35,11 +35,7 @@ Anything that happened before `connect()` is invisible. If you navigate first an
 
 ## CLI or script?
 
-This is the decision that determines whether the task takes 20 seconds or 5 minutes of confused reloading.
-
-Every `cli.js` command is a self-contained round trip: connect → goto → do one thing → **closePage** → disconnect. That is perfect for one question with one answer, and wrong for anything else, because the next command starts from a cold page with no login, no SPA route, and no recorded traffic.
-
-**Use the CLI** when a single page load answers the question:
+A bare `cli.js` command is a self-contained round trip: connect → goto → do one thing → **closePage** → disconnect. Perfect for one question with one answer.
 
 ```bash
 node cli.js dump-forms https://target.com/login
@@ -50,15 +46,23 @@ node cli.js search-sources https://target.com "api_key"
 
 Full command list: `node cli.js --help`.
 
-**Write a script** the moment the task needs a second look at the page. Three signals:
+**Keep one page across commands with `session` and `-`.** `session <url>` loads the page and leaves the tab open; after that, `-` in any URL slot means *the tab that is already open*, so the command skips navigation and inherits the login, the SPA route, and the `scriptId`s:
 
-- *Chained lookups.* `deobfuscate`, `unpack`, `ast-search`, and `download-bundle` all take a `queryOrId` you only learn from `search-sources`. Doing that over the CLI reloads the page for every step; in a script it is one load.
-- *State matters.* Log in, click through, change an SPA route, then inspect. The CLI throws that state away between commands.
-- *Timing matters.* You need to interact and then read what the interaction produced.
+```bash
+node cli.js session https://target.com
+node cli.js search-sources - "sign"        # -> scriptId 4821
+node cli.js deobfuscate - 4821 clean.js    # same load, id still valid
+node cli.js eval 'window.__APP_STATE__'    # eval never navigates
+```
 
-Before you open the page at all, write down every question you want answered — including the follow-ups you can already see coming, and the edge cases you would otherwise go back for. One session can answer all of them; each extra page load costs a full navigation, re-records traffic you already had, and invalidates the `scriptId`s you were holding. The expensive mistake is not writing a script that turns out too big, it is discovering question six after you closed the page.
+`-` implies `--keep-open`; add `--keep-open` to a normal command to leave its page open instead of closing it. Two things `-` does not carry across processes:
 
-Note `cli.js eval` is the odd one out: it does **not** navigate, it evaluates against whatever tab is currently open. Since every other CLI command closes its page on exit, running `eval` after one of them hits a blank tab. Use it to poke at a page you opened yourself, otherwise put the expression in a script.
+- **Recorded traffic.** Each command records from *its own* connect, so `traffic -` and `har -` cover nothing from the original load. They say so in their output (`scope.startedAt: "attach"`); use `--wait <ms>` to record while the open page keeps working, or re-run against the URL.
+- **Anything you must do between two reads in one tick** — a breakpoint pause, a listener installed before navigation, a value that exists for one turn of the event loop.
+
+**Write a script** for those, and whenever you must interact (click, log in, scroll) and then read what the interaction produced.
+
+Before you open the page at all, write down every question you want answered — including the follow-ups you can already see coming. One session can answer all of them; each extra page load costs a full navigation and re-records traffic you already had. The expensive mistake is not writing a script that turns out too big, it is discovering question six after you closed the page.
 
 ### Running a script
 
@@ -106,6 +110,7 @@ node cli.js start        # or: npm start
 | Connects but you are logged out everywhere | Chrome runs a **separate** automation profile, not your daily profile — by design, so automation never touches your real cookies. It lives in `%LOCALAPPDATA%\Google\Chrome\AutomationProfile` on Windows, `~/Library/Application Support/chrome-cdp/profile` on macOS, and `$XDG_DATA_HOME/chrome-cdp/profile` (default `~/.local/share/...`) on Linux | Log in once inside the automation browser (it persists). Do **not** point `CHROME_USER_DATA_DIR` at the user's real profile unless they explicitly ask for it — see [Safety](#safety) |
 | `No usable sandbox!` in Chrome's output, then `Timed out waiting for Chrome CDP` | Ubuntu 23.10+ blocks the unprivileged user namespaces Chrome's sandbox needs | Only reachable with `CHROME_PATH` set to your own Chromium -- the default CloakBrowser launch already passes `--no-sandbox`. Fix the host per Chromium's AppArmor note, or start Chrome yourself and let `connect()` attach to it. Adding `--no-sandbox` to a `CHROME_PATH` launch is the user's call, not yours: it removes the barrier between the target page and the machine |
 | `ECONNREFUSED 127.0.0.1:9222` | Chrome died, or something else owns the port | `node cli.js start`, or pass `--port` / `{ port }` to use another |
+| `eval` or a `-` command hits `about:blank` | The previous command closed its page (the default) | Re-open with `node cli.js session <url>`, or pass `--keep-open` to the command before it |
 | Page opens `chrome://newtab` and reads as empty | `connect()` reuses tab 0 and resets `chrome://` URLs to `about:blank` | Expected — just `goto()` your target |
 | Hangs ~30s then `ProtocolError` | A CDP call exceeded the 30s protocol timeout | `connect({ protocolTimeout: 120000 })` for heavy work like `unpackBundle` on a big bundle |
 
